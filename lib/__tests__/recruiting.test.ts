@@ -11,7 +11,11 @@ import {
 
 describe('recruiting helpers', () => {
   it('generates a stable application code', () => {
-    expect(generateApplicationCode('Google', 'Software Engineer', new Date('2026-07-26'))).toBe('GOOG-SOFT-260725');
+    // Use the local-time Date constructor (year, month, day), not an ISO
+    // date-only string — a bare "2026-07-26" parses as UTC midnight, which
+    // reads back as July 25 in any timezone behind UTC, making the test's
+    // expected value depend on the machine running it.
+    expect(generateApplicationCode('Google', 'Software Engineer', new Date(2026, 6, 26))).toBe('GOOG-SOFT-260726');
   });
 
   it('detects likely duplicates', () => {
@@ -26,8 +30,8 @@ describe('recruiting helpers', () => {
   });
 
   it('creates a unique application code when the base code already exists', () => {
-    const existingCodes = ['GOOG-SOFT-260725', 'GOOG-SOFT-260725-2'];
-    expect(generateApplicationCode('Google', 'Software Engineer', new Date('2026-07-26'), existingCodes)).toBe('GOOG-SOFT-260725-3');
+    const existingCodes = ['GOOG-SOFT-260726', 'GOOG-SOFT-260726-2'];
+    expect(generateApplicationCode('Google', 'Software Engineer', new Date(2026, 6, 26), existingCodes)).toBe('GOOG-SOFT-260726-3');
   });
 
   it('suggests next actions from status', () => {
@@ -53,7 +57,7 @@ describe('recruiting helpers', () => {
   });
 
   it('creates a default next action due date', () => {
-    const due = getNextActionDueDate('Applied', undefined, new Date('2026-07-20'));
-    expect(due.toDateString()).toBe('Wed Jul 29 2026');
+    const due = getNextActionDueDate('Applied', undefined, new Date(2026, 6, 20));
+    expect(due.toDateString()).toBe('Thu Jul 30 2026');
   });
 });
