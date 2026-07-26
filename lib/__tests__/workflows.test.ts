@@ -39,6 +39,7 @@ beforeEach(async () => {
     prisma.contact.deleteMany(),
     prisma.note.deleteMany(),
     prisma.jobDescription.deleteMany(),
+    prisma.offer.deleteMany(),
     prisma.application.deleteMany(),
     prisma.resumeVersion.deleteMany(),
   ]);
@@ -94,8 +95,10 @@ describe('workflow services', () => {
     const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
 
     await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', receivedAt: '2026-07-26T09:00:00', dueAt: '2026-07-28T09:00:00' });
+    const received = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
     await oaCompletedWorkflow(prisma, application.id, {
       action: 'oaCompleted',
+      assessmentId: received.id,
       completedAt: '2026-07-27T09:00:00',
       difficulty: 'Hard',
       confidence: 'Medium',
@@ -167,6 +170,53 @@ describe('workflow services', () => {
 
     const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
     expect(updated.nextActionDue?.getTime()).toBe(subDays(scheduledStart, 1).getTime());
+  });
+
+  it('persists oa completed details without dropping encountered questions', async () => {
+    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', receivedAt: '2026-07-26T09:00:00', dueAt: '2026-07-28T09:00:00' });
+    const received = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
+    await oaCompletedWorkflow(prisma, application.id, {
+      action: 'oaCompleted',
+      assessmentId: received.id,
+      completedAt: '2026-07-27T09:00:00',
+      difficulty: 'Hard',
+      confidence: 'Medium',
+      result: 'Passed',
+      encounteredQuestions: 'Two algorithms',
+      topics: 'Graphs',
+      notes: 'Need follow-up',
+    });
+
+    const assessment = await prisma.assessment.findFirst({ where: { applicationId: application.id } });
+    expect(assessment?.encounteredQuestions).toBe('Two algorithms');
+    expect(assessment?.topics).toBe('Graphs');
+    expect(assessment?.notes).toContain('Need follow-up');
+  });
+
+  it('completes one interview without updating every matching stage', async () => {
+    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const firstInterview = await prisma.interview.create({ data: { applicationId: application.id, stage: 'Recruiter Screen', scheduledStart: new Date('2026-07-26T14:00:00') } });
+    const secondInterview = await prisma.interview.create({ data: { applicationId: application.id, stage: 'Recruiter Screen', scheduledStart: new Date('2026-07-27T14:00:00') } });
+
+    await interviewCompletedWorkflow(prisma, application.id, {
+      action: 'interviewCompleted',
+      interviewId: firstInterview.id,
+      completedAt: '2026-07-26T15:00:00',
+      result: 'Passed',
+      questions: 'Two behavioral questions',
+      whatWentWell: 'Calm and structured',
+      improvements: 'Share more examples',
+      notes: 'Great conversation',
+      followUpDate: '2026-07-29',
+    });
+
+    const updatedFirst = await prisma.interview.findUniqueOrThrow({ where: { id: firstInterview.id } });
+    const updatedSecond = await prisma.interview.findUniqueOrThrow({ where: { id: secondInterview.id } });
+    expect(updatedFirst.completedAt).toBeTruthy();
+    expect(updatedFirst.result).toBe('Passed');
+    expect(updatedSecond.completedAt).toBeNull();
   });
 
   it('persists offer details', async () => {

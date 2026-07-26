@@ -63,44 +63,50 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       case 'offer':
         updated = await offerWorkflow(prisma, id, parsed.data);
         break;
-      case 'description':
+      case 'description': {
+        const payload = parsed.data;
         await prisma.$transaction(async (tx) => {
           await tx.jobDescription.upsert({
             where: { applicationId: id },
             create: {
               applicationId: id,
-              fullText: parsed.data.fullText ?? '',
-              minimumQualifications: parsed.data.minimumQualifications ?? '',
-              preferredQualifications: parsed.data.preferredQualifications ?? '',
-              keywords: parsed.data.keywords ?? '',
+              fullText: payload.fullText ?? '',
+              minimumQualifications: payload.minimumQualifications ?? '',
+              preferredQualifications: payload.preferredQualifications ?? '',
+              keywords: payload.keywords ?? '',
             },
             update: {
-              fullText: parsed.data.fullText ?? '',
-              minimumQualifications: parsed.data.minimumQualifications ?? '',
-              preferredQualifications: parsed.data.preferredQualifications ?? '',
-              keywords: parsed.data.keywords ?? '',
+              fullText: payload.fullText ?? '',
+              minimumQualifications: payload.minimumQualifications ?? '',
+              preferredQualifications: payload.preferredQualifications ?? '',
+              keywords: payload.keywords ?? '',
             },
           });
           await tx.activity.create({
-            data: { applicationId: id, eventType: 'Job description saved', summary: 'Saved job description', metadataJson: JSON.stringify(parsed.data) },
+            data: { applicationId: id, eventType: 'Job description saved', summary: 'Saved job description', metadataJson: JSON.stringify(payload) },
           });
         });
         updated = await prisma.application.findUniqueOrThrow({ where: { id } });
         break;
-      case 'note':
+      }
+      case 'note': {
+        const payload = parsed.data;
         await prisma.$transaction(async (tx) => {
-          await tx.note.create({ data: { applicationId: id, category: parsed.data.category ?? 'General', content: parsed.data.content ?? '' } });
-          await tx.activity.create({ data: { applicationId: id, eventType: 'Note added', summary: 'Added note', metadataJson: JSON.stringify(parsed.data) } });
+          await tx.note.create({ data: { applicationId: id, category: payload.category ?? 'General', content: payload.content ?? '' } });
+          await tx.activity.create({ data: { applicationId: id, eventType: 'Note added', summary: 'Added note', metadataJson: JSON.stringify(payload) } });
         });
         updated = await prisma.application.findUniqueOrThrow({ where: { id } });
         break;
-      case 'contact':
+      }
+      case 'contact': {
+        const payload = parsed.data;
         await prisma.$transaction(async (tx) => {
-          await tx.contact.create({ data: { applicationId: id, name: parsed.data.name ?? 'Unknown', title: parsed.data.title ?? '', email: parsed.data.email ?? '', relationship: parsed.data.relationship ?? '', notes: parsed.data.notes ?? '' } });
-          await tx.activity.create({ data: { applicationId: id, eventType: 'Contact added', summary: 'Added contact', metadataJson: JSON.stringify(parsed.data) } });
+          await tx.contact.create({ data: { applicationId: id, name: payload.name ?? 'Unknown', title: payload.title ?? '', email: payload.email ?? '', relationship: payload.relationship ?? '', notes: payload.notes ?? '' } });
+          await tx.activity.create({ data: { applicationId: id, eventType: 'Contact added', summary: 'Added contact', metadataJson: JSON.stringify(payload) } });
         });
         updated = await prisma.application.findUniqueOrThrow({ where: { id } });
         break;
+      }
       default:
         throw new Error('Unsupported action');
     }
