@@ -119,7 +119,9 @@ const contactSchema = z.object({
   title: z.string().optional(),
   email: z.string().optional(),
   relationship: z.string().optional(),
+  referralStatus: z.string().optional(),
   notes: z.string().optional(),
+  nextFollowUp: optionalDateString(),
 });
 
 const descriptionSchema = z.object({

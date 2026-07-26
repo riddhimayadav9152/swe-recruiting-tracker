@@ -31,11 +31,33 @@ type ApplicationRecord = {
   assessments: Array<{ id: string; type: string; dueAt: string | null; completedAt: string | null; result: string | null }>;
   contacts: Array<{ name: string; email: string | null; notes: string | null }>;
   activities: Array<{ eventType: string; summary: string; createdAt: string }>;
+  offers: { offerDate: string | null; decisionDeadline: string | null; compensationSummary: string | null; notes: string | null } | null;
 };
 
 type ResumeRecord = { id:string; name:string; targetType:string; fileName:string | null; description:string | null; applications: Array<{ id:string }> };
 
 type ProfileRecord = { id:string; name:string; school:string; major:string; graduation:string; preferredLocation:string; currentExperience:string; targetRoles:string; targetCategories:string };
+
+type QuickAction = 'apply' | 'oaReceived' | 'oaCompleted' | 'interviewReceived' | 'interviewCompleted' | 'reject' | 'offer' | 'note' | 'contact';
+
+const quickActionTitles: Record<QuickAction, string> = {
+  apply: 'Mark Applied',
+  oaReceived: 'OA Received',
+  oaCompleted: 'OA Completed',
+  interviewReceived: 'Interview Received',
+  interviewCompleted: 'Interview Completed',
+  reject: 'Rejected',
+  offer: 'Offer Received',
+  note: 'Add Note',
+  contact: 'Add Contact',
+};
+
+const terminalStatuses = ['Offer', 'Accepted', 'Rejected', 'Withdrawn', 'Closed'];
+
+const FieldError = ({ errors, name }: { errors: Record<string, string[] | undefined>; name: string }) => {
+  const message = errors[name]?.[0];
+  return message ? <p className="text-sm text-red-600">{message}</p> : null;
+};
 
 const sections = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutGrid },
@@ -61,11 +83,12 @@ export default function TrackerShell() {
   const [showNewModal, setShowNewModal] = useState(false);
   const [showQuickModal, setShowQuickModal] = useState(false);
   const [showResumeModal, setShowResumeModal] = useState(false);
-  const [quickAction, setQuickAction] = useState<'apply' | 'oaReceived' | 'oaCompleted' | 'interviewReceived' | 'interviewCompleted' | 'reject' | 'offer' | 'note'>('apply');
+  const [quickAction, setQuickAction] = useState<QuickAction>('apply');
   const [newForm, setNewForm] = useState({ company:'', role:'', applicationUrl:'', priority:'P2', status:'Not Applied', location:'', notes:'' });
   const [resumeForm, setResumeForm] = useState({ name:'', targetType:'', fileName:'', description:'' });
   const [resumeErrors, setResumeErrors] = useState<Record<string, string[] | undefined>>({});
   const [quickForm, setQuickForm] = useState<Record<string, string>>({});
+  const [quickErrors, setQuickErrors] = useState<Record<string, string[] | undefined>>({});
   const [loading, setLoading] = useState(true);
 
   const loadData = async () => {
@@ -168,6 +191,7 @@ export default function TrackerShell() {
   const runQuickAction = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!selectedApp) return;
+    setQuickErrors({});
     const payload = { action: quickAction, ...quickForm };
     const response = await fetch(`/api/applications/${selectedApp.id}`, {
       method: 'PATCH',
@@ -178,10 +202,24 @@ export default function TrackerShell() {
       toast.success('Workflow updated');
       setShowQuickModal(false);
       setQuickForm({});
+      setQuickErrors({});
       await loadData();
     } else {
-      toast.error('Unable to update workflow');
+      const data = await response.json();
+      if (data?.errors) {
+        setQuickErrors(data.errors);
+        toast.error('Please fix the highlighted fields');
+      } else {
+        toast.error(data?.error ?? 'Unable to update workflow');
+      }
     }
+  };
+
+  const openQuickAction = (action: QuickAction, initialForm: Record<string, string> = {}) => {
+    setQuickErrors({});
+    setQuickAction(action);
+    setQuickForm(initialForm);
+    setShowQuickModal(true);
   };
 
   const saveJobDescription = async () => {
@@ -403,20 +441,52 @@ export default function TrackerShell() {
                           <span className="rounded-full bg-slate-100 px-2 py-1 text-xs">{selectedApp.priority}</span>
                         </div>
                         <div className="mt-4 space-y-3 text-sm text-slate-600">
-                          <div className="rounded-lg border border-slate-200 p-3">Status: <span className="font-medium text-slate-900">{selectedApp.status}</span></div>
+                          <div className="rounded-lg border border-slate-200 p-3">Status: <span data-testid="app-status" className="font-medium text-slate-900">{selectedApp.status}</span></div>
                           <div className="rounded-lg border border-slate-200 p-3">Stage: <span className="font-medium text-slate-900">{selectedApp.currentStage}</span></div>
                           <div className="rounded-lg border border-slate-200 p-3">Next action: <span className="font-medium text-slate-900">{selectedApp.nextAction}</span></div>
                           <div className="rounded-lg border border-slate-200 p-3">Last update: <span className="font-medium text-slate-900">{formatDistanceToNow(new Date(selectedApp.updatedAt), { addSuffix: true })}</span></div>
+                          {selectedApp.offers && (
+                            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                              <p className="font-medium text-emerald-900">Offer details</p>
+                              <p>Offer date: <span data-testid="offer-date" className="font-medium text-slate-900">{selectedApp.offers.offerDate ? format(new Date(selectedApp.offers.offerDate), 'MMM d, yyyy') : '—'}</span></p>
+                              <p>Decision deadline: <span data-testid="offer-deadline" className="font-medium text-slate-900">{selectedApp.offers.decisionDeadline ? format(new Date(selectedApp.offers.decisionDeadline), 'MMM d, yyyy') : '—'}</span></p>
+                              <p>Compensation: <span data-testid="offer-compensation" className="font-medium text-slate-900">{selectedApp.offers.compensationSummary ?? '—'}</span></p>
+                              <p>Notes: <span data-testid="offer-notes" className="font-medium text-slate-900">{selectedApp.offers.notes ?? '—'}</span></p>
+                            </div>
+                          )}
                         </div>
                         <div className="mt-4 flex flex-wrap gap-2">
-                          <button onClick={() => { setQuickAction('apply'); setQuickForm({ resumeVersionId: selectedApp?.resumeVersion?.id ?? '' }); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Mark Applied</button>
-                          <button onClick={() => { setQuickAction('oaReceived'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">OA Received</button>
-                          <button onClick={() => { setQuickAction('oaCompleted'); setQuickForm({ assessmentId: '' }); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">OA Completed</button>
-                          <button onClick={() => { setQuickAction('interviewReceived'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Interview Received</button>
-                          <button onClick={() => { setQuickAction('interviewCompleted'); setQuickForm({ interviewId: '' }); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Interview Completed</button>
-                          <button onClick={() => { setQuickAction('reject'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Rejected</button>
-                          <button onClick={() => { setQuickAction('offer'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Offer Received</button>
-                          <button onClick={() => { setQuickAction('note'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Add Note</button>
+                          {!selectedApp.dateApplied && (
+                            <button onClick={() => openQuickAction('apply', { resumeVersionId: selectedApp?.resumeVersion?.id ?? '' })} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Mark Applied</button>
+                          )}
+                          <button onClick={() => openQuickAction('oaReceived')} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">OA Received</button>
+                          {selectedApp.assessments.some((assessment) => assessment.type === 'OA' && !assessment.completedAt) && (
+                            <button onClick={() => openQuickAction('oaCompleted', { assessmentId: '' })} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">OA Completed</button>
+                          )}
+                          <button onClick={() => openQuickAction('interviewReceived')} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Interview Received</button>
+                          {selectedApp.interviews.some((interview) => !interview.completedAt) && (
+                            <button onClick={() => openQuickAction('interviewCompleted', { interviewId: '' })} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Interview Completed</button>
+                          )}
+                          <button
+                            onClick={() => {
+                              if (terminalStatuses.includes(selectedApp.status) && !window.confirm('This application already has a final outcome. Mark it rejected anyway?')) return;
+                              openQuickAction('reject');
+                            }}
+                            className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                          >
+                            Rejected
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (terminalStatuses.includes(selectedApp.status) && !window.confirm('This application already has a final outcome. Record another offer anyway?')) return;
+                              openQuickAction('offer');
+                            }}
+                            className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                          >
+                            Offer Received
+                          </button>
+                          <button onClick={() => openQuickAction('note')} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Add Note</button>
+                          <button onClick={() => openQuickAction('contact')} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Add Contact</button>
                         </div>
                       </>
                     ) : <div className="text-sm text-slate-500">Select an application</div>}
@@ -649,7 +719,7 @@ export default function TrackerShell() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl bg-white p-6 shadow-xl">
             <div className="flex items-center justify-between">
-              <h3 className="text-xl font-semibold">{quickAction === 'apply' ? 'Mark Applied' : quickAction === 'oaReceived' ? 'OA Received' : quickAction === 'interviewReceived' ? 'Interview Received' : quickAction === 'reject' ? 'Rejected' : quickAction === 'offer' ? 'Offer Received' : 'Add Note'}</h3>
+              <h3 className="text-xl font-semibold">{quickActionTitles[quickAction]}</h3>
               <button onClick={() => setShowQuickModal(false)}>✕</button>
             </div>
             <form onSubmit={runQuickAction} className="mt-4 space-y-3">
@@ -657,76 +727,99 @@ export default function TrackerShell() {
                 <>
                   <label className="block text-sm font-medium text-slate-700" htmlFor="date-applied">Date applied</label>
                   <input id="date-applied" type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.dateApplied ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dateApplied: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="dateApplied" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="resume-version">Resume version</label>
-                  <select id="resume-version" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.resumeVersionId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, resumeVersionId: e.target.value }))}>
+                  <select id="resume-version" required className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.resumeVersionId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, resumeVersionId: e.target.value }))}>
                     <option value="">Select a resume version</option>
                     {resumes.map((resume) => (
                       <option key={resume.id} value={resume.id}>{resume.name}</option>
                     ))}
                   </select>
+                  <FieldError errors={quickErrors} name="resumeVersionId" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="email-used">Email used</label>
                   <input id="email-used" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Email used" value={quickForm.emailUsed ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, emailUsed: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="emailUsed" />
                 </>
               )}
               {quickAction === 'oaReceived' && (
                 <>
                   <label className="block text-sm font-medium text-slate-700" htmlFor="received-at">Received at</label>
                   <input id="received-at" type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.receivedAt ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, receivedAt: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="receivedAt" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-due-at">Due at</label>
-                  <input id="oa-due-at" type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.dueAt ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dueAt: e.target.value }))} />
+                  <input id="oa-due-at" required type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.dueAt ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dueAt: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="dueAt" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-platform">Platform</label>
                   <input id="oa-platform" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Platform" value={quickForm.platform ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, platform: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="platform" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-notes">Notes</label>
                   <textarea id="oa-notes" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="notes" />
                 </>
               )}
               {quickAction === 'interviewReceived' && (
                 <>
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-stage">Interview stage</label>
-                  <select id="interview-stage" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.stage ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, stage: e.target.value }))}>
+                  <select id="interview-stage" required className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.stage ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, stage: e.target.value }))}>
                     <option value="">Select a stage</option>
                     <option value="Recruiter Screen">Recruiter Screen</option>
                     <option value="Technical Interview">Technical Interview</option>
                     <option value="Final Round">Final Round</option>
                   </select>
+                  <FieldError errors={quickErrors} name="stage" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="scheduled-start">Scheduled start</label>
                   <input id="scheduled-start" required type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.scheduledStart ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, scheduledStart: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="scheduledStart" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="scheduled-end">Scheduled end</label>
                   <input id="scheduled-end" type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.scheduledEnd ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, scheduledEnd: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="scheduledEnd" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="duration-minutes">Duration minutes</label>
                   <input id="duration-minutes" type="number" min="1" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.durationMinutes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, durationMinutes: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="durationMinutes" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-timezone">Time zone</label>
                   <input id="interview-timezone" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Time zone" value={quickForm.timezone ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, timezone: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="timezone" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-format">Format</label>
                   <input id="interview-format" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Format" value={quickForm.format ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, format: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="format" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-location">Location</label>
                   <input id="interview-location" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Location" value={quickForm.location ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, location: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="location" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="meeting-url">Meeting URL</label>
                   <input id="meeting-url" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Meeting URL" value={quickForm.meetingUrl ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, meetingUrl: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="meetingUrl" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="recruiter">Recruiter</label>
                   <input id="recruiter" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Recruiter" value={quickForm.recruiter ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, recruiter: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="recruiter" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interviewer">Interviewer</label>
                   <input id="interviewer" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Interviewer" value={quickForm.interviewer ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, interviewer: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="interviewer" />
                 </>
               )}
               {quickAction === 'reject' && (
                 <>
                   <label className="block text-sm font-medium text-slate-700" htmlFor="rejection-reason">Rejection reason</label>
                   <input id="rejection-reason" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Rejection reason" value={quickForm.rejectionReason ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, rejectionReason: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="rejectionReason" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="rejection-notes">Rejection notes</label>
                   <textarea id="rejection-notes" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Rejection notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="notes" />
                 </>
               )}
               {quickAction === 'offer' && (
                 <>
                   <label className="block text-sm font-medium text-slate-700" htmlFor="offer-date">Offer date</label>
                   <input id="offer-date" type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.offerDate ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, offerDate: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="offerDate" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="decision-deadline">Decision deadline</label>
-                  <input id="decision-deadline" type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.decisionDeadline ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, decisionDeadline: e.target.value }))} />
+                  <input id="decision-deadline" required type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.decisionDeadline ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, decisionDeadline: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="decisionDeadline" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="compensation-summary">Compensation</label>
                   <input id="compensation-summary" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Compensation" value={quickForm.compensationSummary ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, compensationSummary: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="compensationSummary" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="offer-notes">Notes</label>
                   <textarea id="offer-notes" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="notes" />
                 </>
               )}
               {quickAction === 'oaCompleted' && (
@@ -734,26 +827,34 @@ export default function TrackerShell() {
                   <label className="block text-sm font-medium text-slate-700" htmlFor="assessment-id">Assessment</label>
                   <select id="assessment-id" required className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.assessmentId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, assessmentId: e.target.value }))}>
                     <option value="">Select an assessment</option>
-                    {selectedApp.assessments.map((assessment) => (
+                    {selectedApp.assessments.filter((assessment) => !assessment.completedAt).map((assessment) => (
                       <option key={assessment.id} value={assessment.id}>
-                        {assessment.type} • due {assessment.dueAt ? format(new Date(assessment.dueAt), 'MMM d, yyyy') : 'unknown'}{assessment.completedAt ? ' • completed' : ''}
+                        {assessment.type} • due {assessment.dueAt ? format(new Date(assessment.dueAt), 'MMM d, yyyy') : 'unknown'}
                       </option>
                     ))}
                   </select>
+                  <FieldError errors={quickErrors} name="assessmentId" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-completed-at">Completed at</label>
                   <input id="oa-completed-at" type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.completedAt ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, completedAt: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="completedAt" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-difficulty">Difficulty</label>
                   <input id="oa-difficulty" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Difficulty" value={quickForm.difficulty ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, difficulty: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="difficulty" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-confidence">Confidence</label>
                   <input id="oa-confidence" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Confidence" value={quickForm.confidence ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, confidence: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="confidence" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-result">Result</label>
                   <input id="oa-result" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Result" value={quickForm.result ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, result: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="result" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="encountered-questions">Encountered questions</label>
                   <textarea id="encountered-questions" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Encountered questions" value={quickForm.encounteredQuestions ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, encounteredQuestions: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="encounteredQuestions" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-topics">Topics</label>
                   <textarea id="oa-topics" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Topics" value={quickForm.topics ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, topics: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="topics" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="oa-completed-notes">Notes</label>
                   <textarea id="oa-completed-notes" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="notes" />
                 </>
               )}
               {quickAction === 'interviewCompleted' && (
@@ -761,32 +862,66 @@ export default function TrackerShell() {
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-id">Interview</label>
                   <select id="interview-id" required className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.interviewId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, interviewId: e.target.value }))}>
                     <option value="">Select an interview</option>
-                    {selectedApp.interviews.map((interview) => (
+                    {selectedApp.interviews.filter((interview) => !interview.completedAt).map((interview) => (
                       <option key={interview.id} value={interview.id}>
-                        {interview.stage} • {interview.scheduledStart ? format(new Date(interview.scheduledStart), 'MMM d, yyyy h:mm a') : 'unscheduled'}{interview.completedAt ? ' • completed' : ''}
+                        {interview.stage} • {interview.scheduledStart ? format(new Date(interview.scheduledStart), 'MMM d, yyyy h:mm a') : 'unscheduled'}
                       </option>
                     ))}
                   </select>
+                  <FieldError errors={quickErrors} name="interviewId" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-completed-at">Completed at</label>
                   <input id="interview-completed-at" type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.completedAt ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, completedAt: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="completedAt" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-result">Result</label>
                   <input id="interview-result" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Result" value={quickForm.result ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, result: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="result" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-questions">Questions</label>
                   <textarea id="interview-questions" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Questions" value={quickForm.questions ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, questions: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="questions" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="what-went-well">What went well</label>
                   <textarea id="what-went-well" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="What went well" value={quickForm.whatWentWell ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, whatWentWell: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="whatWentWell" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="improvements">Improvements</label>
                   <textarea id="improvements" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Improvements" value={quickForm.improvements ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, improvements: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="improvements" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-follow-up">Follow-up date</label>
                   <input id="interview-follow-up" type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.followUpDate ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, followUpDate: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="followUpDate" />
                   <label className="block text-sm font-medium text-slate-700" htmlFor="interview-completed-notes">Notes</label>
                   <textarea id="interview-completed-notes" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="notes" />
                 </>
               )}
               {quickAction === 'note' && (
                 <>
                   <label className="block text-sm font-medium text-slate-700" htmlFor="note-content">Note</label>
-                  <textarea id="note-content" className="w-full rounded-lg border border-slate-300 p-3" rows={4} placeholder="Add a note" value={quickForm.content ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, content: e.target.value }))} />
+                  <textarea id="note-content" required className="w-full rounded-lg border border-slate-300 p-3" rows={4} placeholder="Add a note" value={quickForm.content ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, content: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="content" />
+                </>
+              )}
+              {quickAction === 'contact' && (
+                <>
+                  <label className="block text-sm font-medium text-slate-700" htmlFor="contact-name">Name</label>
+                  <input id="contact-name" required className="w-full rounded-lg border border-slate-300 p-3" placeholder="Name" value={quickForm.name ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, name: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="name" />
+                  <label className="block text-sm font-medium text-slate-700" htmlFor="contact-title">Title</label>
+                  <input id="contact-title" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Title" value={quickForm.title ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, title: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="title" />
+                  <label className="block text-sm font-medium text-slate-700" htmlFor="contact-email">Email</label>
+                  <input id="contact-email" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Email" value={quickForm.email ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, email: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="email" />
+                  <label className="block text-sm font-medium text-slate-700" htmlFor="contact-relationship">Relationship</label>
+                  <input id="contact-relationship" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Relationship" value={quickForm.relationship ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, relationship: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="relationship" />
+                  <label className="block text-sm font-medium text-slate-700" htmlFor="contact-referral-status">Referral status</label>
+                  <input id="contact-referral-status" className="w-full rounded-lg border border-slate-300 p-3" placeholder="Referral status" value={quickForm.referralStatus ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, referralStatus: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="referralStatus" />
+                  <label className="block text-sm font-medium text-slate-700" htmlFor="contact-next-follow-up">Next follow-up date</label>
+                  <input id="contact-next-follow-up" type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.nextFollowUp ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, nextFollowUp: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="nextFollowUp" />
+                  <label className="block text-sm font-medium text-slate-700" htmlFor="contact-notes">Notes</label>
+                  <textarea id="contact-notes" className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="notes" />
                 </>
               )}
               <div className="flex justify-end gap-2">

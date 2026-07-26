@@ -8,7 +8,8 @@ export default defineConfig({
   testDir: './tests/e2e',
   timeout: 30_000,
   globalSetup: require.resolve('./tests/e2e/global-setup.ts'),
-  use: { baseURL, browserName: 'chromium' },
+  reporter: [['html', { open: 'never' }]],
+  use: { baseURL, browserName: 'chromium', trace: 'retain-on-failure', screenshot: 'only-on-failure' },
   webServer: {
     command: `npm run dev -- -p ${port}`,
     url: baseURL,

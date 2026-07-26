@@ -39,22 +39,31 @@ test('completes an OA and interview workflow for a single application', async ({
 
   await openApplication(page, company);
 
+  // Mark Applied is only offered before the application has been submitted.
+  await expect(page.getByRole('button', { name: 'Mark Applied' })).toBeVisible();
   await page.getByRole('button', { name: 'Mark Applied' }).click();
   await page.getByLabel('Resume version').selectOption({ label: resumeName });
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
+  await expect(page.getByTestId('app-status')).toHaveText('Applied');
+  await expect(page.getByRole('button', { name: 'Mark Applied' })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'OA Received' }).click();
   await page.getByLabel('Due at').fill('2026-08-01T09:00');
   await page.getByLabel('Platform').fill('Coderbyte');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
+  await expect(page.getByTestId('app-status')).toHaveText('OA');
+  // OA Completed only becomes available once an incomplete OA exists.
+  await expect(page.getByRole('button', { name: 'OA Completed' })).toBeVisible();
 
   await page.getByRole('button', { name: 'OA Completed' }).click();
   await page.getByLabel('Assessment').selectOption({ index: 1 });
   await page.getByLabel('Result').fill('Passed');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
+  // Once completed, the OA no longer offers a completion action.
+  await expect(page.getByRole('button', { name: 'OA Completed' })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Interview Received' }).click();
   await page.getByLabel('Interview stage').selectOption('Recruiter Screen');
@@ -62,12 +71,34 @@ test('completes an OA and interview workflow for a single application', async ({
   await page.getByLabel('Recruiter').fill('Mina');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
+  await expect(page.getByTestId('app-status')).toHaveText('Recruiter Screen');
+  await expect(page.getByRole('button', { name: 'Interview Completed' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Interview Completed' }).click();
   await page.getByLabel('Interview', { exact: true }).selectOption({ index: 1 });
   await page.getByLabel('Result', { exact: true }).fill('Passed');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
+  // The exact interview that was scheduled is now completed, so the action disappears.
+  await expect(page.getByRole('button', { name: 'Interview Completed' })).toHaveCount(0);
+});
+
+test('shows field-level validation errors for invalid input', async ({ page }) => {
+  await page.goto('/');
+  await waitForTrackerLoaded(page);
+
+  const company = `Invalid Co ${uniqueId()}`;
+  await createOpportunity(page, company);
+  await openApplication(page, company);
+
+  await page.getByRole('button', { name: 'Interview Received' }).click();
+  await page.getByLabel('Interview stage').selectOption('Recruiter Screen');
+  await page.getByLabel('Scheduled start').fill('2026-08-05T14:00');
+  await page.getByLabel('Meeting URL').fill('not-a-url');
+  await page.getByRole('button', { name: 'Save' }).click();
+
+  await expect(page.getByText('Please fix the highlighted fields')).toBeVisible();
+  await expect(page.locator('#meeting-url + p')).toContainText('Enter a valid URL');
 });
 
 test('records an offer on one application and a rejection on a separate application', async ({ page }) => {
@@ -86,18 +117,31 @@ test('records an offer on one application and a rejection on a separate applicat
   await page.getByLabel('Compensation').fill('$180k base');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
+  await expect(page.getByTestId('app-status')).toHaveText('Offer');
+  await expect(page.getByTestId('offer-deadline')).not.toHaveText('—');
+  await expect(page.getByTestId('offer-compensation')).toHaveText('$180k base');
+
+  // Confirm the offer fields actually persisted server-side, independent of
+  // any local-timezone display formatting for the date.
+  const applications = await page.request.get('/api/applications').then((res) => res.json());
+  const offerApplication = applications.find((app: { company: string }) => app.company === offerCompany);
+  expect(offerApplication.offers.compensationSummary).toBe('$180k base');
+  expect(new Date(offerApplication.offers.decisionDeadline).toISOString().slice(0, 10)).toBe('2026-08-15');
 
   await openApplication(page, rejectCompany);
   await page.getByRole('button', { name: 'Rejected' }).click();
   await page.getByLabel('Rejection notes').fill('No longer hiring');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
+  await expect(page.getByTestId('app-status')).toHaveText('Rejected');
 
   await openApplication(page, offerCompany);
+  await expect(page.getByTestId('app-status')).toHaveText('Offer');
   await expect(page.locator('table tbody tr', { hasText: offerCompany })).toContainText('Offer');
   await expect(page.locator('table tbody tr', { hasText: offerCompany })).not.toContainText('Rejected');
 
   await openApplication(page, rejectCompany);
+  await expect(page.getByTestId('app-status')).toHaveText('Rejected');
   await expect(page.locator('table tbody tr', { hasText: rejectCompany })).toContainText('Rejected');
   await expect(page.locator('table tbody tr', { hasText: rejectCompany })).not.toContainText('Offer');
 });

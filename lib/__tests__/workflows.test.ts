@@ -219,6 +219,48 @@ describe('workflow services', () => {
     expect(updatedSecond.completedAt).toBeNull();
   });
 
+  it('rejects completing an interview that is already completed', async () => {
+    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const interview = await prisma.interview.create({ data: { applicationId: application.id, stage: 'Recruiter Screen', scheduledStart: new Date('2026-07-26T14:00:00') } });
+
+    await interviewCompletedWorkflow(prisma, application.id, {
+      action: 'interviewCompleted',
+      interviewId: interview.id,
+      completedAt: '2026-07-26T15:00:00',
+      result: 'Passed',
+    });
+
+    await expect(
+      interviewCompletedWorkflow(prisma, application.id, {
+        action: 'interviewCompleted',
+        interviewId: interview.id,
+        completedAt: '2026-07-27T15:00:00',
+        result: 'Passed again',
+      }),
+    ).rejects.toThrow('Interview already completed');
+  });
+
+  it('rejects completing an OA assessment that is already completed', async () => {
+    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00' });
+    const assessment = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
+
+    await oaCompletedWorkflow(prisma, application.id, {
+      action: 'oaCompleted',
+      assessmentId: assessment.id,
+      result: 'Passed',
+    });
+
+    await expect(
+      oaCompletedWorkflow(prisma, application.id, {
+        action: 'oaCompleted',
+        assessmentId: assessment.id,
+        result: 'Passed again',
+      }),
+    ).rejects.toThrow('Assessment already completed');
+  });
+
   it('persists offer details', async () => {
     const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
 

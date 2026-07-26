@@ -16,6 +16,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       notesRelation: true,
       activities: true,
       documents: true,
+      offers: true,
     },
   });
 
@@ -101,7 +102,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       case 'contact': {
         const payload = parsed.data;
         await prisma.$transaction(async (tx) => {
-          await tx.contact.create({ data: { applicationId: id, name: payload.name ?? 'Unknown', title: payload.title ?? '', email: payload.email ?? '', relationship: payload.relationship ?? '', notes: payload.notes ?? '' } });
+          await tx.contact.create({
+            data: {
+              applicationId: id,
+              name: payload.name ?? 'Unknown',
+              title: payload.title ?? '',
+              email: payload.email ?? '',
+              relationship: payload.relationship ?? '',
+              referralStatus: payload.referralStatus ?? '',
+              notes: payload.notes ?? '',
+              nextFollowUp: payload.nextFollowUp ? new Date(payload.nextFollowUp) : null,
+            },
+          });
           await tx.activity.create({ data: { applicationId: id, eventType: 'Contact added', summary: 'Added contact', metadataJson: JSON.stringify(payload) } });
         });
         updated = await prisma.application.findUniqueOrThrow({ where: { id } });

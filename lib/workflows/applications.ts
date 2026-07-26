@@ -184,6 +184,7 @@ export async function oaCompletedWorkflow(prisma: WorkflowPrisma, applicationId:
   return prisma.$transaction(async (tx) => {
     const assessment = await tx.assessment.findUnique({ where: { id: payload.assessmentId } });
     if (!assessment || assessment.applicationId !== applicationId) throw new Error('Assessment not found');
+    if (assessment.completedAt) throw new Error('Assessment already completed');
 
     const updated = await tx.application.update({
       where: { id: applicationId },
@@ -198,7 +199,7 @@ export async function oaCompletedWorkflow(prisma: WorkflowPrisma, applicationId:
     await tx.assessment.update({
       where: { id: assessment.id },
       data: {
-        completedAt: payload.completedAt ? new Date(payload.completedAt) : null,
+        completedAt: payload.completedAt ? new Date(payload.completedAt) : new Date(),
         difficulty: payload.difficulty ?? null,
         confidence: payload.confidence ?? null,
         result: payload.result ?? null,
@@ -293,6 +294,7 @@ export async function interviewCompletedWorkflow(prisma: WorkflowPrisma, applica
   return prisma.$transaction(async (tx) => {
     const interview = await tx.interview.findUnique({ where: { id: interviewId } });
     if (!interview || interview.applicationId !== applicationId) throw new Error('Interview not found');
+    if (interview.completedAt) throw new Error('Interview already completed');
 
     const stage = payload.stage ?? interview.stage;
     const status = deriveInterviewStatus(stage);
