@@ -25,6 +25,11 @@ describe('recruiting helpers', () => {
     expect(duplicate).toBeDefined();
   });
 
+  it('creates a unique application code when the base code already exists', () => {
+    const existingCodes = ['GOOG-SOFT-260725', 'GOOG-SOFT-260725-2'];
+    expect(generateApplicationCode('Google', 'Software Engineer', new Date('2026-07-26'), existingCodes)).toBe('GOOG-SOFT-260725-3');
+  });
+
   it('suggests next actions from status', () => {
     expect(generateNextAction('Applied')).toBe('Monitor application and email');
     expect(generateNextAction('Offer')).toBe('Review, compare, and respond to offer');

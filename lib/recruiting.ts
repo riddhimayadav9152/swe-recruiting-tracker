@@ -33,10 +33,23 @@ export type ApplicationInput = {
   notes?: string;
 };
 
-export const generateApplicationCode = (company: string, role: string, createdAt: Date = new Date()) => {
+export const generateApplicationCode = (company: string, role: string, createdAt: Date = new Date(), existingCodes: string[] = []) => {
   const base = `${company.replace(/[^a-z0-9]+/gi, '').slice(0, 4).toUpperCase()}-${role.replace(/[^a-z0-9]+/gi, '').slice(0, 4).toUpperCase()}`;
   const stamp = format(createdAt, 'yyMMdd');
-  return `${base}-${stamp}`;
+  const seed = `${base}-${stamp}`;
+  const normalized = new Set(existingCodes.map((value) => value.toUpperCase()));
+  if (!normalized.has(seed.toUpperCase())) {
+    return seed;
+  }
+
+  let suffix = 2;
+  let code = `${seed}-${suffix}`;
+  while (normalized.has(code.toUpperCase())) {
+    suffix += 1;
+    code = `${seed}-${suffix}`;
+  }
+
+  return code;
 };
 
 export const generateNextAction = (status: ApplicationStatus, currentStage?: string | null) => {

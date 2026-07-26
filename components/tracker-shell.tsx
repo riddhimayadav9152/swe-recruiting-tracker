@@ -26,7 +26,7 @@ type ApplicationRecord = {
   createdAt: string;
   updatedAt: string;
   jobDescription: { fullText: string | null } | null;
-  resumeVersion: { name: string } | null;
+  resumeVersion: { id: string; name: string } | null;
   interviews: Array<{ stage: string; scheduledStart: string | null; notes: string | null }>;
   contacts: Array<{ name: string; email: string | null; notes: string | null }>;
   activities: Array<{ eventType: string; summary: string; createdAt: string }>;
@@ -372,7 +372,7 @@ export default function TrackerShell() {
                           <div className="rounded-lg border border-slate-200 p-3">Last update: <span className="font-medium text-slate-900">{formatDistanceToNow(new Date(selectedApp.updatedAt), { addSuffix: true })}</span></div>
                         </div>
                         <div className="mt-4 flex flex-wrap gap-2">
-                          <button onClick={() => { setQuickAction('apply'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Mark Applied</button>
+                          <button onClick={() => { setQuickAction('apply'); setQuickForm({ resumeVersionId: selectedApp?.resumeVersion?.id ?? '' }); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Mark Applied</button>
                           <button onClick={() => { setQuickAction('oa'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">OA Received</button>
                           <button onClick={() => { setQuickAction('interview'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Interview Received</button>
                           <button onClick={() => { setQuickAction('reject'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Rejected</button>
@@ -584,7 +584,12 @@ export default function TrackerShell() {
               {quickAction === 'apply' && (
                 <>
                   <input type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.dateApplied ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dateApplied: e.target.value }))} />
-                  <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Resume version" value={quickForm.resumeVersionId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, resumeVersionId: e.target.value }))} />
+                  <select className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.resumeVersionId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, resumeVersionId: e.target.value }))}>
+                    <option value="">Select a resume version</option>
+                    {resumes.map((resume) => (
+                      <option key={resume.id} value={resume.id}>{resume.name}</option>
+                    ))}
+                  </select>
                   <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Email used" value={quickForm.emailUsed ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, emailUsed: e.target.value }))} />
                 </>
               )}
