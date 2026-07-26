@@ -59,8 +59,10 @@ export default function TrackerShell() {
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
   const [showNewModal, setShowNewModal] = useState(false);
   const [showQuickModal, setShowQuickModal] = useState(false);
-  const [quickAction, setQuickAction] = useState<'apply' | 'oa' | 'interview' | 'reject' | 'offer' | 'note'>('apply');
+  const [showResumeModal, setShowResumeModal] = useState(false);
+  const [quickAction, setQuickAction] = useState<'apply' | 'oaReceived' | 'oaCompleted' | 'interviewReceived' | 'interviewCompleted' | 'reject' | 'offer' | 'note'>('apply');
   const [newForm, setNewForm] = useState({ company:'', role:'', applicationUrl:'', priority:'P2', status:'Not Applied', location:'', notes:'' });
+  const [resumeForm, setResumeForm] = useState({ name:'', targetType:'', fileName:'' });
   const [quickForm, setQuickForm] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
@@ -237,6 +239,28 @@ export default function TrackerShell() {
     if (response.ok) toast.success('Profile saved');
   };
 
+  const createResume = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const response = await fetch('/api/resumes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: resumeForm.name,
+        targetType: resumeForm.targetType,
+        fileName: resumeForm.fileName || null,
+        description: '',
+      }),
+    });
+    if (response.ok) {
+      toast.success('Resume created');
+      setShowResumeModal(false);
+      setResumeForm({ name:'', targetType:'', fileName:'' });
+      loadData();
+    } else {
+      toast.error('Unable to create resume');
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="flex min-h-screen flex-col lg:flex-row">
@@ -373,8 +397,8 @@ export default function TrackerShell() {
                         </div>
                         <div className="mt-4 flex flex-wrap gap-2">
                           <button onClick={() => { setQuickAction('apply'); setQuickForm({ resumeVersionId: selectedApp?.resumeVersion?.id ?? '' }); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Mark Applied</button>
-                          <button onClick={() => { setQuickAction('oa'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">OA Received</button>
-                          <button onClick={() => { setQuickAction('interview'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Interview Received</button>
+                          <button onClick={() => { setQuickAction('oaReceived'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">OA Received</button>
+                          <button onClick={() => { setQuickAction('interviewReceived'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Interview Received</button>
                           <button onClick={() => { setQuickAction('reject'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Rejected</button>
                           <button onClick={() => { setQuickAction('offer'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Offer Received</button>
                           <button onClick={() => { setQuickAction('note'); setQuickForm({}); setShowQuickModal(true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">Add Note</button>
@@ -482,6 +506,7 @@ export default function TrackerShell() {
                 <div className="rounded-xl border border-slate-200 bg-white p-6">
                   <h3 className="text-lg font-semibold">Resume versions</h3>
                   <div className="mt-4 space-y-3">
+                    <button onClick={() => setShowResumeModal(true)} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white">Create Resume</button>
                     {resumes.map((resume) => (
                       <div key={resume.id} className="rounded-lg border border-slate-200 p-3 text-sm">
                         <div className="font-medium">{resume.name}</div>
@@ -577,14 +602,14 @@ export default function TrackerShell() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
             <div className="flex items-center justify-between">
-              <h3 className="text-xl font-semibold">{quickAction === 'apply' ? 'Mark Applied' : quickAction === 'oa' ? 'OA Received' : quickAction === 'interview' ? 'Interview Received' : quickAction === 'reject' ? 'Rejected' : quickAction === 'offer' ? 'Offer Received' : 'Add Note'}</h3>
+              <h3 className="text-xl font-semibold">{quickAction === 'apply' ? 'Mark Applied' : quickAction === 'oaReceived' ? 'OA Received' : quickAction === 'interviewReceived' ? 'Interview Received' : quickAction === 'reject' ? 'Rejected' : quickAction === 'offer' ? 'Offer Received' : 'Add Note'}</h3>
               <button onClick={() => setShowQuickModal(false)}>✕</button>
             </div>
             <form onSubmit={runQuickAction} className="mt-4 space-y-3">
               {quickAction === 'apply' && (
                 <>
                   <input type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.dateApplied ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dateApplied: e.target.value }))} />
-                  <select className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.resumeVersionId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, resumeVersionId: e.target.value }))}>
+                  <select aria-label="Resume version" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.resumeVersionId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, resumeVersionId: e.target.value }))}>
                     <option value="">Select a resume version</option>
                     {resumes.map((resume) => (
                       <option key={resume.id} value={resume.id}>{resume.name}</option>
@@ -593,26 +618,34 @@ export default function TrackerShell() {
                   <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Email used" value={quickForm.emailUsed ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, emailUsed: e.target.value }))} />
                 </>
               )}
-              {quickAction === 'oa' && (
+              {quickAction === 'oaReceived' && (
                 <>
-                  <input type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.nextActionDue ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, nextActionDue: e.target.value }))} />
+                  <input type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.receivedAt ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, receivedAt: e.target.value }))} />
+                  <input type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.dueAt ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dueAt: e.target.value }))} />
                   <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Platform" value={quickForm.platform ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, platform: e.target.value }))} />
                   <textarea className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
                 </>
               )}
-              {quickAction === 'interview' && (
+              {quickAction === 'interviewReceived' && (
                 <>
-                  <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Interview stage" value={quickForm.currentStage ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, currentStage: e.target.value }))} />
+                  <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Interview stage" value={quickForm.stage ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, stage: e.target.value }))} />
                   <input type="datetime-local" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.scheduledStart ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, scheduledStart: e.target.value }))} />
+                  <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Time zone" value={quickForm.timezone ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, timezone: e.target.value }))} />
+                  <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Format" value={quickForm.format ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, format: e.target.value }))} />
                   <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Location" value={quickForm.location ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, location: e.target.value }))} />
+                  <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Recruiter" value={quickForm.recruiter ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, recruiter: e.target.value }))} />
+                  <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Interviewer" value={quickForm.interviewer ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, interviewer: e.target.value }))} />
                 </>
               )}
               {quickAction === 'reject' && (
-                <textarea className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Rejection notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
+                <>
+                  <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Rejection reason" value={quickForm.rejectionReason ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, rejectionReason: e.target.value }))} />
+                  <textarea className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Rejection notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
+                </>
               )}
               {quickAction === 'offer' && (
                 <>
-                  <input type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.nextActionDue ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, nextActionDue: e.target.value }))} />
+                  <input type="date" className="w-full rounded-lg border border-slate-300 p-3" value={quickForm.decisionDeadline ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, decisionDeadline: e.target.value }))} />
                   <input className="w-full rounded-lg border border-slate-300 p-3" placeholder="Compensation" value={quickForm.compensationSummary ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, compensationSummary: e.target.value }))} />
                   <textarea className="w-full rounded-lg border border-slate-300 p-3" rows={3} placeholder="Notes" value={quickForm.notes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, notes: e.target.value }))} />
                 </>

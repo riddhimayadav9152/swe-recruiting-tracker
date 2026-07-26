@@ -43,18 +43,5 @@ export async function POST(request: Request) {
   const existingCodes = await prisma.application.findMany({ select: { applicationCode: true } });
   const created = await createApplicationRecord(prisma, input, existingCodes.map((item) => item.applicationCode));
 
-  await prisma.activity.create({
-    data: {
-      applicationId: created.id,
-      eventType: 'Opportunity created',
-      previousStatus: null,
-      newStatus: created.status,
-      previousStage: null,
-      newStage: created.currentStage,
-      summary: `Added new opportunity for ${created.company}`,
-      metadataJson: JSON.stringify({ priority: created.priority }),
-    },
-  });
-
   return NextResponse.json(created);
 }
