@@ -1,14 +1,26 @@
 import { z } from 'zod';
-
-const isValidDate = (value: string) => !Number.isNaN(new Date(value).getTime());
+import { isDateOnlyString, isParseableDate } from '@/lib/dates';
 
 const emptyToUndefined = (value: unknown) => (typeof value === 'string' && value.trim() === '' ? undefined : value);
 
-const optionalDateString = () =>
-  z.preprocess(emptyToUndefined, z.string().trim().refine(isValidDate, 'Valid date required').optional());
+// datetime-local values (and other real timestamps) — accepts anything that
+// parses to a valid instant, e.g. "2026-08-15T14:00" from an
+// `<input type="datetime-local">`, or a full ISO timestamp.
+const optionalDateTimeString = () =>
+  z.preprocess(emptyToUndefined, z.string().trim().refine(isParseableDate, 'Valid date required').optional());
 
-const requiredDateString = (message: string) =>
-  optionalDateString().refine((value): value is string => value !== undefined, message);
+const requiredDateTimeString = (message: string) =>
+  optionalDateTimeString().refine((value): value is string => value !== undefined, message);
+
+// date-only values — must be the bare "YYYY-MM-DD" shape an
+// `<input type="date">` actually emits, so a datetime-local string can never
+// be silently accepted where a date-only value is expected. Parse these
+// with `parseDateOnly` and display them with `formatDateOnly` (see lib/dates.ts).
+const optionalDateOnlyString = () =>
+  z.preprocess(emptyToUndefined, z.string().trim().refine(isDateOnlyString, 'Enter a valid date (YYYY-MM-DD)').optional());
+
+const requiredDateOnlyString = (message: string) =>
+  optionalDateOnlyString().refine((value): value is string => value !== undefined, message);
 
 const optionalUrlString = () =>
   z.preprocess(emptyToUndefined, z.string().trim().url('Enter a valid URL').optional());
@@ -24,8 +36,8 @@ export const applicationCreateSchema = z.object({
   status: z.enum(['Not Applied', 'Preparing', 'Applied', 'OA', 'Recruiter Screen', 'Technical Interview', 'Final Round', 'Offer', 'Accepted', 'Rejected', 'Withdrawn', 'Closed']).optional(),
   currentStage: z.string().optional(),
   location: z.string().optional(),
-  applicationDeadline: optionalDateString().nullable(),
-  dateFound: optionalDateString().nullable(),
+  applicationDeadline: optionalDateOnlyString().nullable(),
+  dateFound: optionalDateOnlyString().nullable(),
   notes: z.string().optional(),
 });
 
@@ -34,42 +46,45 @@ const interviewStageSchema = z.enum(['Recruiter Screen', 'Technical Interview', 
 const applySchema = z.object({
   action: z.literal('apply'),
   resumeVersionId: z.string().trim().min(1, 'Resume is required'),
-  dateApplied: optionalDateString(),
+  dateApplied: optionalDateOnlyString(),
   emailUsed: z.string().optional(),
   coverLetterStatus: z.string().optional(),
   notes: z.string().optional(),
-  nextActionDue: optionalDateString(),
+  nextActionDue: optionalDateTimeString(),
+  override: z.boolean().optional(),
 });
 
 const oaReceivedSchema = z.object({
   action: z.literal('oaReceived'),
-  receivedAt: optionalDateString(),
-  dueAt: requiredDateString('dueAt is required'),
+  receivedAt: optionalDateTimeString(),
+  dueAt: requiredDateTimeString('dueAt is required'),
   platform: z.string().optional(),
   durationMinutes: z.coerce.number().int().positive().optional(),
   questionCount: z.coerce.number().int().positive().optional(),
   topics: z.string().optional(),
   notes: z.string().optional(),
-  nextActionDue: optionalDateString(),
+  nextActionDue: optionalDateTimeString(),
+  override: z.boolean().optional(),
 });
 
 const oaCompletedSchema = z.object({
   action: z.literal('oaCompleted'),
   assessmentId: z.string().trim().min(1, 'assessmentId is required'),
-  completedAt: optionalDateString(),
+  completedAt: optionalDateTimeString(),
   difficulty: z.string().optional(),
   confidence: z.string().optional(),
   result: z.string().optional(),
   encounteredQuestions: z.string().optional(),
   topics: z.string().optional(),
   notes: z.string().optional(),
+  override: z.boolean().optional(),
 });
 
 const interviewReceivedSchema = z.object({
   action: z.literal('interviewReceived'),
   stage: interviewStageSchema,
-  scheduledStart: requiredDateString('scheduledStart is required'),
-  scheduledEnd: optionalDateString().nullable(),
+  scheduledStart: requiredDateTimeString('scheduledStart is required'),
+  scheduledEnd: optionalDateTimeString().nullable(),
   timezone: z.string().optional().nullable(),
   format: z.string().optional().nullable(),
   durationMinutes: z.coerce.number().int().positive().optional(),
@@ -78,33 +93,37 @@ const interviewReceivedSchema = z.object({
   recruiter: z.string().optional().nullable(),
   interviewer: z.string().optional().nullable(),
   notes: z.string().optional(),
+  override: z.boolean().optional(),
 });
 
 const interviewCompletedSchema = z.object({
   action: z.literal('interviewCompleted'),
   interviewId: z.string().trim().min(1, 'interviewId is required'),
   stage: interviewStageSchema.optional(),
-  completedAt: optionalDateString(),
+  completedAt: optionalDateTimeString(),
   result: z.string().optional(),
   questions: z.string().optional(),
   whatWentWell: z.string().optional(),
   improvements: z.string().optional(),
   notes: z.string().optional(),
-  followUpDate: optionalDateString(),
+  followUpDate: optionalDateOnlyString(),
+  override: z.boolean().optional(),
 });
 
 const rejectSchema = z.object({
   action: z.literal('reject'),
   rejectionReason: z.string().optional(),
   notes: z.string().optional(),
+  override: z.boolean().optional(),
 });
 
 const offerSchema = z.object({
   action: z.literal('offer'),
-  offerDate: optionalDateString(),
-  decisionDeadline: requiredDateString('decisionDeadline is required'),
+  offerDate: optionalDateOnlyString(),
+  decisionDeadline: requiredDateOnlyString('decisionDeadline is required'),
   compensationSummary: z.string().optional(),
   notes: z.string().optional(),
+  override: z.boolean().optional(),
 });
 
 const noteSchema = z.object({
@@ -121,7 +140,7 @@ const contactSchema = z.object({
   relationship: z.string().optional(),
   referralStatus: z.string().optional(),
   notes: z.string().optional(),
-  nextFollowUp: optionalDateString(),
+  nextFollowUp: optionalDateOnlyString(),
 });
 
 const descriptionSchema = z.object({

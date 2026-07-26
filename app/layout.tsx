@@ -19,7 +19,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" className={spaceGrotesk.variable}>
       <body>
         {children}
-        <Toaster position="top-right" toastOptions={{ style: { borderRadius: '14px', background: 'rgba(255,255,255,0.9)', backdropFilter: 'blur(8px)', border: '1px solid rgba(196,181,253,0.4)', color: '#3730a3', boxShadow: '0 8px 24px rgba(139,92,246,0.18)' } }} />
+        <Toaster position="top-right" toastOptions={{ style: { borderRadius: '8px', border: '1px solid #e2e8f0', color: '#1e293b' } }} />
       </body>
     </html>
   );

@@ -6,6 +6,7 @@ import { PrismaClient } from '@prisma/client';
 import { subDays } from 'date-fns';
 import {
   applyWorkflow,
+  contactWorkflow,
   createApplicationRecord,
   interviewCompletedWorkflow,
   interviewReceivedWorkflow,
@@ -49,6 +50,18 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
+const createAppliedApplication = async (overrides: { company?: string; role?: string; applicationUrl?: string } = {}) => {
+  const resume = await prisma.resumeVersion.create({ data: { name: `Resume ${Math.random()}`, targetType: 'SWE' } });
+  const application = await createApplicationRecord(prisma, {
+    company: overrides.company ?? 'Acme',
+    role: overrides.role ?? 'Software Engineer',
+    applicationUrl: overrides.applicationUrl ?? 'https://acme.com/apply',
+    priority: 'P1',
+  });
+  await applyWorkflow(prisma, application.id, { action: 'apply', resumeVersionId: resume.id });
+  return application;
+};
+
 describe('workflow services', () => {
   it('marks applied with a valid resume', async () => {
     const resume = await prisma.resumeVersion.create({ data: { name: '2026 Resume', targetType: 'SWE', fileName: 'resume.pdf' } });
@@ -69,7 +82,7 @@ describe('workflow services', () => {
   });
 
   it('persists oa received details', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
 
     await oaReceivedWorkflow(prisma, application.id, {
       action: 'oaReceived',
@@ -92,7 +105,7 @@ describe('workflow services', () => {
   });
 
   it('persists oa completed details', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
 
     await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', receivedAt: '2026-07-26T09:00:00', dueAt: '2026-07-28T09:00:00' });
     const received = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
@@ -117,7 +130,7 @@ describe('workflow services', () => {
   });
 
   it('maps recruiter screen and technical interview stages', async () => {
-    const recruiter = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const recruiter = await createAppliedApplication();
     await interviewReceivedWorkflow(prisma, recruiter.id, {
       action: 'interviewReceived',
       stage: 'Recruiter Screen',
@@ -134,7 +147,7 @@ describe('workflow services', () => {
     expect(recruiterUpdated.status).toBe('Recruiter Screen');
     expect(recruiterUpdated.currentStage).toBe('Recruiter Screen');
 
-    const technical = await createApplicationRecord(prisma, { company: 'Beta', role: 'ML Engineer', applicationUrl: 'https://beta.com/apply', priority: 'P1' });
+    const technical = await createAppliedApplication({ company: 'Beta', role: 'ML Engineer', applicationUrl: 'https://beta.com/apply' });
     await interviewReceivedWorkflow(prisma, technical.id, {
       action: 'interviewReceived',
       stage: 'Technical Interview',
@@ -153,7 +166,7 @@ describe('workflow services', () => {
   });
 
   it('uses the scheduled interview time for the next-action deadline', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
     const scheduledStart = new Date('2026-07-26T14:00:00');
 
     await interviewReceivedWorkflow(prisma, application.id, {
@@ -173,7 +186,7 @@ describe('workflow services', () => {
   });
 
   it('persists oa completed details without dropping encountered questions', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
 
     await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', receivedAt: '2026-07-26T09:00:00', dueAt: '2026-07-28T09:00:00' });
     const received = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
@@ -196,7 +209,8 @@ describe('workflow services', () => {
   });
 
   it('completes one interview without updating every matching stage', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
+    await prisma.application.update({ where: { id: application.id }, data: { status: 'Recruiter Screen' } });
     const firstInterview = await prisma.interview.create({ data: { applicationId: application.id, stage: 'Recruiter Screen', scheduledStart: new Date('2026-07-26T14:00:00') } });
     const secondInterview = await prisma.interview.create({ data: { applicationId: application.id, stage: 'Recruiter Screen', scheduledStart: new Date('2026-07-27T14:00:00') } });
 
@@ -220,7 +234,8 @@ describe('workflow services', () => {
   });
 
   it('rejects completing an interview that is already completed', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
+    await prisma.application.update({ where: { id: application.id }, data: { status: 'Recruiter Screen' } });
     const interview = await prisma.interview.create({ data: { applicationId: application.id, stage: 'Recruiter Screen', scheduledStart: new Date('2026-07-26T14:00:00') } });
 
     await interviewCompletedWorkflow(prisma, application.id, {
@@ -241,7 +256,7 @@ describe('workflow services', () => {
   });
 
   it('rejects completing an OA assessment that is already completed', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
 
     await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00' });
     const assessment = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
@@ -262,7 +277,7 @@ describe('workflow services', () => {
   });
 
   it('persists offer details', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
 
     await offerWorkflow(prisma, application.id, {
       action: 'offer',
@@ -292,12 +307,61 @@ describe('workflow services', () => {
   });
 
   it('does not mutate application state when the workflow fails', async () => {
-    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    const application = await createAppliedApplication();
 
     await expect(interviewReceivedWorkflow(prisma, application.id, { action: 'interviewReceived', stage: 'Recruiter Screen' as never })).rejects.toThrow('scheduledStart is required');
 
     const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
-    expect(updated.status).toBe('Not Applied');
-    expect(updated.currentStage).toBe('Discovered');
+    expect(updated.status).toBe('Applied');
+    expect(updated.currentStage).toBe('Application Submitted');
+  });
+
+  it('persists all contact fields', async () => {
+    const application = await createAppliedApplication();
+
+    await contactWorkflow(prisma, application.id, {
+      action: 'contact',
+      name: 'Jordan Recruiter',
+      title: 'Technical Recruiter',
+      email: 'jordan@acme.com',
+      relationship: 'Recruiter',
+      referralStatus: 'Referred by alum',
+      notes: 'Met at career fair',
+      nextFollowUp: '2026-08-20',
+    });
+
+    const contact = await prisma.contact.findFirstOrThrow({ where: { applicationId: application.id } });
+    expect(contact.name).toBe('Jordan Recruiter');
+    expect(contact.title).toBe('Technical Recruiter');
+    expect(contact.email).toBe('jordan@acme.com');
+    expect(contact.relationship).toBe('Recruiter');
+    expect(contact.referralStatus).toBe('Referred by alum');
+    expect(contact.notes).toBe('Met at career fair');
+    expect(contact.nextFollowUp?.toISOString()).toBe('2026-08-20T00:00:00.000Z');
+  });
+
+  it('rejects reusing OA/interview actions on a rejected application without an override', async () => {
+    const application = await createAppliedApplication();
+    await rejectWorkflow(prisma, application.id, { action: 'reject', rejectionReason: 'Position closed' });
+
+    await expect(
+      oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00' }),
+    ).rejects.toThrow(/override/);
+    await expect(
+      interviewReceivedWorkflow(prisma, application.id, { action: 'interviewReceived', stage: 'Recruiter Screen', scheduledStart: '2026-07-28T09:00:00' }),
+    ).rejects.toThrow(/override/);
+
+    const stillRejected = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
+    expect(stillRejected.status).toBe('Rejected');
+  });
+
+  it('allows reusing OA/interview actions on a rejected application with an explicit override', async () => {
+    const application = await createAppliedApplication();
+    await rejectWorkflow(prisma, application.id, { action: 'reject', rejectionReason: 'Reconsidered' });
+
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00', override: true });
+
+    const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
+    expect(updated.status).toBe('OA');
   });
 });

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { workflowPayloadSchema } from '@/lib/schemas/workflows';
-import { applyWorkflow, interviewCompletedWorkflow, interviewReceivedWorkflow, oaCompletedWorkflow, oaReceivedWorkflow, offerWorkflow, rejectWorkflow } from '@/lib/workflows/applications';
+import { applyWorkflow, contactWorkflow, interviewCompletedWorkflow, interviewReceivedWorkflow, oaCompletedWorkflow, oaReceivedWorkflow, offerWorkflow, rejectWorkflow } from '@/lib/workflows/applications';
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -99,26 +99,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         updated = await prisma.application.findUniqueOrThrow({ where: { id } });
         break;
       }
-      case 'contact': {
-        const payload = parsed.data;
-        await prisma.$transaction(async (tx) => {
-          await tx.contact.create({
-            data: {
-              applicationId: id,
-              name: payload.name ?? 'Unknown',
-              title: payload.title ?? '',
-              email: payload.email ?? '',
-              relationship: payload.relationship ?? '',
-              referralStatus: payload.referralStatus ?? '',
-              notes: payload.notes ?? '',
-              nextFollowUp: payload.nextFollowUp ? new Date(payload.nextFollowUp) : null,
-            },
-          });
-          await tx.activity.create({ data: { applicationId: id, eventType: 'Contact added', summary: 'Added contact', metadataJson: JSON.stringify(payload) } });
-        });
+      case 'contact':
+        await contactWorkflow(prisma, id, parsed.data);
         updated = await prisma.application.findUniqueOrThrow({ where: { id } });
         break;
-      }
       default:
         throw new Error('Unsupported action');
     }

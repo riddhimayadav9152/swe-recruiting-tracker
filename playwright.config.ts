@@ -11,9 +11,16 @@ export default defineConfig({
   reporter: [['html', { open: 'never' }]],
   use: { baseURL, browserName: 'chromium', trace: 'retain-on-failure', screenshot: 'only-on-failure' },
   webServer: {
-    command: `npm run dev -- -p ${port}`,
+    // Invoke `next dev` directly rather than through `npm run dev` — npm
+    // doesn't forward signals to the process it spawns, so going through it
+    // can leave the dev server running after Playwright tears down.
+    command: `npx next dev -p ${port}`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    // Always launch a fresh server against the dedicated E2E database —
+    // reusing a server the developer left running elsewhere (e.g. on the
+    // dev database) would silently defeat the isolation `global-setup.ts`
+    // sets up, so this is never conditional on CI.
+    reuseExistingServer: false,
     timeout: 120_000,
     env: { DATABASE_URL: e2eDatabaseUrl },
   },

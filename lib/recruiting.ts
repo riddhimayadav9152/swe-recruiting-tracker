@@ -1,4 +1,4 @@
-import { format, isAfter, isBefore, isSameDay, parseISO, subDays } from 'date-fns';
+import { format, isBefore, isSameDay, parseISO, subDays } from 'date-fns';
 
 export const statuses = [
   'Not Applied',

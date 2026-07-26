@@ -1,8 +1,11 @@
 import type { PrismaClient } from '@prisma/client';
 import { addMinutes, subDays } from 'date-fns';
 import { generateApplicationCode, generateNextAction } from '@/lib/recruiting';
+import { parseDateOnly, parseDateTimeLocal } from '@/lib/dates';
+import { assertActionAllowed } from '@/lib/workflow-policy';
 import type {
   ApplyPayload,
+  ContactPayload,
   InterviewCompletedPayload,
   InterviewReceivedPayload,
   OaCompletedPayload,
@@ -17,12 +20,6 @@ import type {
 // services has one name to import instead of `@prisma/client`'s PrismaClient
 // directly in every file.
 export type WorkflowPrisma = PrismaClient;
-
-const parseDate = (value: unknown) => {
-  if (!value) return null;
-  const parsed = new Date(String(value));
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-};
 
 const deriveInterviewStatus = (stage: string) => {
   switch (stage) {
@@ -52,8 +49,8 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
   const applicationCode = generateApplicationCode(input.company, input.role, new Date(), existingCodes);
   const initialStatus = input.status ?? 'Not Applied';
   const initialStage = input.currentStage ?? 'Discovered';
-  const dateFound = input.dateFound ? new Date(input.dateFound) : new Date();
-  const nextActionDue = input.applicationDeadline ? new Date(input.applicationDeadline) : new Date(Date.now() + 2 * 86400000);
+  const dateFound = input.dateFound ? parseDateOnly(input.dateFound) ?? new Date() : new Date();
+  const nextActionDue = input.applicationDeadline ? parseDateOnly(input.applicationDeadline) ?? new Date(Date.now() + 2 * 86400000) : new Date(Date.now() + 2 * 86400000);
 
   return prisma.$transaction(async (tx) => {
     const application = await tx.application.create({
@@ -66,7 +63,7 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
         status: initialStatus,
         currentStage: initialStage,
         location: input.location ?? null,
-        applicationDeadline: input.applicationDeadline ? new Date(input.applicationDeadline) : null,
+        applicationDeadline: input.applicationDeadline ? parseDateOnly(input.applicationDeadline) : null,
         dateFound,
         notes: input.notes ?? '',
         nextAction: generateNextAction(initialStatus as 'Not Applied' | 'Preparing' | 'Applied' | 'OA' | 'Recruiter Screen' | 'Technical Interview' | 'Final Round' | 'Offer' | 'Accepted' | 'Rejected' | 'Withdrawn' | 'Closed', initialStage),
@@ -94,6 +91,7 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
 export async function applyWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: ApplyPayload) {
   const existing = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!existing) throw new Error('Application not found');
+  assertActionAllowed(existing.status, 'apply', payload.override === true);
 
   const resumeVersionId = payload.resumeVersionId;
   const resumeVersion = await prisma.resumeVersion.findUnique({ where: { id: resumeVersionId } });
@@ -105,12 +103,12 @@ export async function applyWorkflow(prisma: WorkflowPrisma, applicationId: strin
       data: {
         status: 'Applied',
         currentStage: 'Application Submitted',
-        dateApplied: payload.dateApplied ? new Date(payload.dateApplied) : new Date(),
+        dateApplied: payload.dateApplied ? parseDateOnly(payload.dateApplied) ?? new Date() : new Date(),
         resumeVersionId,
         emailUsed: payload.emailUsed ?? existing.emailUsed,
         coverLetterStatus: payload.coverLetterStatus ?? existing.coverLetterStatus,
         nextAction: 'Monitor application and email',
-        nextActionDue: payload.nextActionDue ? new Date(payload.nextActionDue) : new Date(Date.now() + 10 * 86400000),
+        nextActionDue: payload.nextActionDue ? parseDateTimeLocal(payload.nextActionDue) ?? new Date(Date.now() + 10 * 86400000) : new Date(Date.now() + 10 * 86400000),
       },
     });
 
@@ -134,6 +132,7 @@ export async function applyWorkflow(prisma: WorkflowPrisma, applicationId: strin
 export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: OaReceivedPayload) {
   const existing = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!existing) throw new Error('Application not found');
+  assertActionAllowed(existing.status, 'oaReceived', payload.override === true);
 
   return prisma.$transaction(async (tx) => {
     const updated = await tx.application.update({
@@ -142,7 +141,7 @@ export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: 
         status: 'OA',
         currentStage: 'Online Assessment',
         nextAction: 'Prepare for and complete OA',
-        nextActionDue: payload.nextActionDue ? new Date(payload.nextActionDue) : new Date(payload.dueAt),
+        nextActionDue: payload.nextActionDue ? parseDateTimeLocal(payload.nextActionDue) ?? new Date(payload.dueAt) : parseDateTimeLocal(payload.dueAt) ?? new Date(payload.dueAt),
       },
     });
 
@@ -150,8 +149,8 @@ export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: 
       data: {
         applicationId,
         type: 'OA',
-        receivedAt: payload.receivedAt ? new Date(payload.receivedAt) : null,
-        dueAt: new Date(payload.dueAt),
+        receivedAt: payload.receivedAt ? parseDateTimeLocal(payload.receivedAt) : null,
+        dueAt: parseDateTimeLocal(payload.dueAt),
         platform: payload.platform ?? null,
         durationMinutes: payload.durationMinutes ?? null,
         questionCount: payload.questionCount ?? null,
@@ -180,6 +179,7 @@ export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: 
 export async function oaCompletedWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: OaCompletedPayload) {
   const existing = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!existing) throw new Error('Application not found');
+  assertActionAllowed(existing.status, 'oaCompleted', payload.override === true);
 
   return prisma.$transaction(async (tx) => {
     const assessment = await tx.assessment.findUnique({ where: { id: payload.assessmentId } });
@@ -199,7 +199,7 @@ export async function oaCompletedWorkflow(prisma: WorkflowPrisma, applicationId:
     await tx.assessment.update({
       where: { id: assessment.id },
       data: {
-        completedAt: payload.completedAt ? new Date(payload.completedAt) : new Date(),
+        completedAt: payload.completedAt ? parseDateTimeLocal(payload.completedAt) ?? new Date() : new Date(),
         difficulty: payload.difficulty ?? null,
         confidence: payload.confidence ?? null,
         result: payload.result ?? null,
@@ -229,14 +229,15 @@ export async function oaCompletedWorkflow(prisma: WorkflowPrisma, applicationId:
 export async function interviewReceivedWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: InterviewReceivedPayload) {
   const existing = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!existing) throw new Error('Application not found');
+  assertActionAllowed(existing.status, 'interviewReceived', payload.override === true);
 
-  const scheduledStart = parseDate(payload.scheduledStart);
+  const scheduledStart = parseDateTimeLocal(payload.scheduledStart);
   if (!scheduledStart) throw new Error('scheduledStart is required');
 
   const stage = payload.stage;
   const status = deriveInterviewStatus(stage);
   const scheduledEnd = payload.scheduledEnd
-    ? new Date(payload.scheduledEnd)
+    ? parseDateTimeLocal(payload.scheduledEnd)
     : payload.durationMinutes
       ? addMinutes(scheduledStart, payload.durationMinutes)
       : null;
@@ -288,6 +289,7 @@ export async function interviewReceivedWorkflow(prisma: WorkflowPrisma, applicat
 export async function interviewCompletedWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: InterviewCompletedPayload) {
   const existing = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!existing) throw new Error('Application not found');
+  assertActionAllowed(existing.status, 'interviewCompleted', payload.override === true);
 
   const interviewId = payload.interviewId;
 
@@ -298,7 +300,7 @@ export async function interviewCompletedWorkflow(prisma: WorkflowPrisma, applica
 
     const stage = payload.stage ?? interview.stage;
     const status = deriveInterviewStatus(stage);
-    const followUpDate = payload.followUpDate ? new Date(payload.followUpDate) : new Date(Date.now() + 5 * 86400000);
+    const followUpDate = payload.followUpDate ? parseDateOnly(payload.followUpDate) ?? new Date(Date.now() + 5 * 86400000) : new Date(Date.now() + 5 * 86400000);
 
     const updated = await tx.application.update({
       where: { id: applicationId },
@@ -313,7 +315,7 @@ export async function interviewCompletedWorkflow(prisma: WorkflowPrisma, applica
     await tx.interview.update({
       where: { id: interviewId },
       data: {
-        completedAt: payload.completedAt ? new Date(payload.completedAt) : new Date(),
+        completedAt: payload.completedAt ? parseDateTimeLocal(payload.completedAt) ?? new Date() : new Date(),
         result: payload.result ?? null,
         questions: payload.questions ?? null,
         whatWentWell: payload.whatWentWell ?? null,
@@ -343,6 +345,7 @@ export async function interviewCompletedWorkflow(prisma: WorkflowPrisma, applica
 export async function rejectWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: RejectPayload) {
   const existing = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!existing) throw new Error('Application not found');
+  assertActionAllowed(existing.status, 'reject', payload.override === true);
 
   return prisma.$transaction(async (tx) => {
     const updated = await tx.application.update({
@@ -377,6 +380,7 @@ export async function rejectWorkflow(prisma: WorkflowPrisma, applicationId: stri
 export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: OfferPayload) {
   const existing = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!existing) throw new Error('Application not found');
+  assertActionAllowed(existing.status, 'offer', payload.override === true);
 
   return prisma.$transaction(async (tx) => {
     const updated = await tx.application.update({
@@ -385,7 +389,7 @@ export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: strin
         status: 'Offer',
         currentStage: 'Offer Received',
         nextAction: 'Review, compare, and respond to offer',
-        nextActionDue: new Date(payload.decisionDeadline),
+        nextActionDue: parseDateOnly(payload.decisionDeadline),
         compensationSummary: payload.compensationSummary ?? existing.compensationSummary,
         notes: payload.notes ? `${existing.notes ?? ''}\n${payload.notes}`.trim() : existing.notes,
       },
@@ -395,14 +399,14 @@ export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: strin
       where: { applicationId },
       create: {
         applicationId,
-        offerDate: payload.offerDate ? new Date(payload.offerDate) : null,
-        decisionDeadline: new Date(payload.decisionDeadline),
+        offerDate: payload.offerDate ? parseDateOnly(payload.offerDate) : null,
+        decisionDeadline: parseDateOnly(payload.decisionDeadline),
         compensationSummary: payload.compensationSummary ?? null,
         notes: payload.notes ?? null,
       },
       update: {
-        offerDate: payload.offerDate ? new Date(payload.offerDate) : undefined,
-        decisionDeadline: new Date(payload.decisionDeadline),
+        offerDate: payload.offerDate ? parseDateOnly(payload.offerDate) ?? undefined : undefined,
+        decisionDeadline: parseDateOnly(payload.decisionDeadline) ?? undefined,
         compensationSummary: payload.compensationSummary ?? undefined,
         notes: payload.notes ?? undefined,
       },
@@ -422,5 +426,39 @@ export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: strin
     });
 
     return updated;
+  });
+}
+
+// Contacts are informational — adding one never changes an application's
+// status/stage, so unlike the workflows above this isn't gated by
+// lib/workflow-policy.ts.
+export async function contactWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: ContactPayload) {
+  const existing = await prisma.application.findUnique({ where: { id: applicationId } });
+  if (!existing) throw new Error('Application not found');
+
+  return prisma.$transaction(async (tx) => {
+    const contact = await tx.contact.create({
+      data: {
+        applicationId,
+        name: payload.name,
+        title: payload.title ?? '',
+        email: payload.email ?? '',
+        relationship: payload.relationship ?? '',
+        referralStatus: payload.referralStatus ?? '',
+        notes: payload.notes ?? '',
+        nextFollowUp: payload.nextFollowUp ? parseDateOnly(payload.nextFollowUp) : null,
+      },
+    });
+
+    await tx.activity.create({
+      data: {
+        applicationId,
+        eventType: 'Contact added',
+        summary: 'Added contact',
+        metadataJson: JSON.stringify(payload),
+      },
+    });
+
+    return contact;
   });
 }
