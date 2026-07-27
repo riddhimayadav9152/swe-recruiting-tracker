@@ -1,7 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { addMinutes, subDays } from 'date-fns';
 import { generateApplicationCode, generateNextAction } from '@/lib/recruiting';
-import { parseDateOnly, parseDateTimeLocal } from '@/lib/dates';
+import { parseDateOnly, parseDateTimeLocal, parseZonedDateTime } from '@/lib/dates';
 import { assertActionAllowed } from '@/lib/workflow-policy';
 import type {
   ApplyPayload,
@@ -51,6 +51,7 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
   const initialStage = input.currentStage ?? 'Discovered';
   const dateFound = input.dateFound ? parseDateOnly(input.dateFound) ?? new Date() : new Date();
   const nextActionDue = input.applicationDeadline ? parseDateOnly(input.applicationDeadline) ?? new Date(Date.now() + 2 * 86400000) : new Date(Date.now() + 2 * 86400000);
+  const nextActionDueKind: 'date' | 'timestamp' = input.applicationDeadline ? 'date' : 'timestamp';
 
   return prisma.$transaction(async (tx) => {
     const application = await tx.application.create({
@@ -68,6 +69,7 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
         notes: input.notes ?? '',
         nextAction: generateNextAction(initialStatus as 'Not Applied' | 'Preparing' | 'Applied' | 'OA' | 'Recruiter Screen' | 'Technical Interview' | 'Final Round' | 'Offer' | 'Accepted' | 'Rejected' | 'Withdrawn' | 'Closed', initialStage),
         nextActionDue,
+        nextActionDueKind,
       },
     });
 
@@ -109,6 +111,7 @@ export async function applyWorkflow(prisma: WorkflowPrisma, applicationId: strin
         coverLetterStatus: payload.coverLetterStatus ?? existing.coverLetterStatus,
         nextAction: 'Monitor application and email',
         nextActionDue: payload.nextActionDue ? parseDateTimeLocal(payload.nextActionDue) ?? new Date(Date.now() + 10 * 86400000) : new Date(Date.now() + 10 * 86400000),
+        nextActionDueKind: 'timestamp',
       },
     });
 
@@ -142,6 +145,7 @@ export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: 
         currentStage: 'Online Assessment',
         nextAction: 'Prepare for and complete OA',
         nextActionDue: payload.nextActionDue ? parseDateTimeLocal(payload.nextActionDue) ?? new Date(payload.dueAt) : parseDateTimeLocal(payload.dueAt) ?? new Date(payload.dueAt),
+        nextActionDueKind: 'timestamp',
       },
     });
 
@@ -193,6 +197,7 @@ export async function oaCompletedWorkflow(prisma: WorkflowPrisma, applicationId:
         currentStage: 'Online Assessment',
         nextAction: 'Await OA result',
         nextActionDue: new Date(Date.now() + 4 * 86400000),
+        nextActionDueKind: 'timestamp',
       },
     });
 
@@ -231,13 +236,18 @@ export async function interviewReceivedWorkflow(prisma: WorkflowPrisma, applicat
   if (!existing) throw new Error('Application not found');
   assertActionAllowed(existing.status, 'interviewReceived', payload.override === true);
 
-  const scheduledStart = parseDateTimeLocal(payload.scheduledStart);
+  // scheduledStart/scheduledEnd are wall-clock times with no timezone of
+  // their own ("2026-08-15T14:00") — they must be interpreted in the
+  // interview's own selected IANA timezone, never the server process's
+  // timezone, or the stored UTC instant would silently depend on wherever
+  // this code happens to run.
+  const scheduledStart = parseZonedDateTime(payload.scheduledStart, payload.timezone);
   if (!scheduledStart) throw new Error('scheduledStart is required');
 
   const stage = payload.stage;
   const status = deriveInterviewStatus(stage);
   const scheduledEnd = payload.scheduledEnd
-    ? parseDateTimeLocal(payload.scheduledEnd)
+    ? parseZonedDateTime(payload.scheduledEnd, payload.timezone)
     : payload.durationMinutes
       ? addMinutes(scheduledStart, payload.durationMinutes)
       : null;
@@ -250,6 +260,7 @@ export async function interviewReceivedWorkflow(prisma: WorkflowPrisma, applicat
         currentStage: stage,
         nextAction: `Prepare for ${stage}`,
         nextActionDue: subDays(scheduledStart, 1),
+        nextActionDueKind: 'timestamp',
       },
     });
 
@@ -309,6 +320,7 @@ export async function interviewCompletedWorkflow(prisma: WorkflowPrisma, applica
         currentStage: stage,
         nextAction: 'Follow up after interview',
         nextActionDue: followUpDate,
+        nextActionDueKind: payload.followUpDate ? 'date' : 'timestamp',
       },
     });
 
@@ -355,6 +367,7 @@ export async function rejectWorkflow(prisma: WorkflowPrisma, applicationId: stri
         currentStage: 'Rejected',
         nextAction: 'No active next action',
         nextActionDue: null,
+        nextActionDueKind: 'timestamp',
         outcome: payload.rejectionReason ?? existing.outcome,
         notes: payload.notes ? `${existing.notes ?? ''}\n${payload.notes}`.trim() : existing.notes,
       },
@@ -390,6 +403,7 @@ export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: strin
         currentStage: 'Offer Received',
         nextAction: 'Review, compare, and respond to offer',
         nextActionDue: parseDateOnly(payload.decisionDeadline),
+        nextActionDueKind: 'date',
         compensationSummary: payload.compensationSummary ?? existing.compensationSummary,
         notes: payload.notes ? `${existing.notes ?? ''}\n${payload.notes}`.trim() : existing.notes,
       },

@@ -89,6 +89,7 @@ test('completes an OA and interview workflow for a single application', async ({
   await page.getByRole('button', { name: 'Interview Received' }).click();
   await page.getByLabel('Interview stage').selectOption('Recruiter Screen');
   await page.getByLabel('Scheduled start').fill('2026-08-05T14:00');
+  await page.getByLabel('Time zone').selectOption('America/Los_Angeles');
   await page.getByLabel('Recruiter').fill('Mina');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
@@ -115,6 +116,7 @@ test('shows field-level validation errors for invalid input', async ({ page }) =
   await page.getByRole('button', { name: 'Interview Received' }).click();
   await page.getByLabel('Interview stage').selectOption('Recruiter Screen');
   await page.getByLabel('Scheduled start').fill('2026-08-05T14:00');
+  await page.getByLabel('Time zone').selectOption('America/Los_Angeles');
   await page.getByLabel('Meeting URL').fill('not-a-url');
   await page.getByRole('button', { name: 'Save' }).click();
 
@@ -239,27 +241,32 @@ test('rejecting an application prevents OA Received and Interview Received witho
   await expect(page.getByTestId('app-status')).toHaveText('OA');
 });
 
-test('an imported Applied record without a date does not show Mark Applied', async ({ page }) => {
-  const company = `Imported Co ${uniqueId()}`;
-  const created = await page.request
-    .post('/api/applications', {
-      data: {
-        company,
-        role: 'Software Engineer',
-        applicationUrl: `https://example.com/apply/${uniqueId()}`,
-        priority: 'P1',
-        status: 'Applied',
-      },
-    })
-    .then((res) => res.json());
-  expect(created.dateApplied).toBeNull();
+test('the standard creation endpoint rejects an advanced status', async ({ page }) => {
+  // Only Not Applied/Preparing can be created directly — Applied and beyond
+  // are only reachable through the matching workflow action, which is what
+  // guarantees status and currentStage always stay consistent (see
+  // lib/schemas/workflows.ts and lib/workflow-policy.ts). This is also what
+  // makes the missing-application-date warning logic exercised at the unit
+  // level (lib/__tests__/workflow-policy.test.ts) safe to rely on: there is
+  // no path — short of a future, separately-validated import feature — that
+  // produces an "Applied" (or later) record with no application date.
+  const company = `Invalid Status Co ${uniqueId()}`;
+  const response = await page.request.post('/api/applications', {
+    data: {
+      company,
+      role: 'Software Engineer',
+      applicationUrl: `https://example.com/apply/${uniqueId()}`,
+      priority: 'P1',
+      status: 'Applied',
+    },
+  });
+  expect(response.status()).toBe(400);
 
   await page.goto('/');
   await waitForTrackerLoaded(page);
-  await openApplication(page, company);
-
-  await expect(page.getByRole('button', { name: 'Mark Applied' })).toHaveCount(0);
-  await expect(page.getByTestId('missing-date-applied-warning')).toBeVisible();
+  await page.getByRole('button', { name: 'Applications', exact: true }).click();
+  await waitForTrackerLoaded(page);
+  await expect(page.locator('table tbody tr', { hasText: company })).toHaveCount(0);
 });
 
 test('backend rejects an invalid workflow transition even via a direct API call', async ({ page }) => {

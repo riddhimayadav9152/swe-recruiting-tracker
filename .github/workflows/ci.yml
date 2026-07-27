@@ -8,6 +8,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A temporary, self-contained DATABASE_URL so this job never depends on a
+    # developer's local .env (which is gitignored and doesn't exist in CI).
+    # `npm test` (lib/__tests__/workflows.test.ts) ignores this and uses its
+    # own dedicated data/workflow-test.db regardless, so unit tests and this
+    # placeholder never share a database file.
+    env:
+      DATABASE_URL: "file:./data/ci-build.db"
     steps:
       - uses: actions/checkout@v4
 
@@ -33,6 +40,13 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # Same self-containment as above; the actual Playwright run points at its
+    # own dedicated data/e2e-test.db via playwright.config.ts's webServer.env
+    # and tests/e2e/global-setup.ts, so this is only a placeholder for the
+    # "Generate Prisma client" step and is never the database the app or
+    # tests actually use.
+    env:
+      DATABASE_URL: "file:./data/ci-e2e-placeholder.db"
     steps:
       - uses: actions/checkout@v4
 

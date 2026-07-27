@@ -348,7 +348,7 @@ describe('workflow services', () => {
       oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00' }),
     ).rejects.toThrow(/override/);
     await expect(
-      interviewReceivedWorkflow(prisma, application.id, { action: 'interviewReceived', stage: 'Recruiter Screen', scheduledStart: '2026-07-28T09:00:00' }),
+      interviewReceivedWorkflow(prisma, application.id, { action: 'interviewReceived', stage: 'Recruiter Screen', scheduledStart: '2026-07-28T09:00:00', timezone: 'America/New_York' }),
     ).rejects.toThrow(/override/);
 
     const stillRejected = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
@@ -363,5 +363,86 @@ describe('workflow services', () => {
 
     const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
     expect(updated.status).toBe('OA');
+  });
+
+  it('rejects override:true for an invalid transition from a non-terminal status (Not Applied -> Offer)', async () => {
+    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+
+    await expect(
+      offerWorkflow(prisma, application.id, { action: 'offer', decisionDeadline: '2026-08-01', override: true }),
+    ).rejects.toThrow(/not a valid transition/);
+
+    const stillNotApplied = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
+    expect(stillNotApplied.status).toBe('Not Applied');
+  });
+
+  it('permits OA Received after a recruiter screen', async () => {
+    const application = await createAppliedApplication();
+    await interviewReceivedWorkflow(prisma, application.id, {
+      action: 'interviewReceived',
+      stage: 'Recruiter Screen',
+      scheduledStart: '2026-07-26T14:00:00',
+      timezone: 'America/New_York',
+    });
+
+    let updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
+    expect(updated.status).toBe('Recruiter Screen');
+
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00' });
+
+    updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
+    expect(updated.status).toBe('OA');
+    const interviews = await prisma.interview.findMany({ where: { applicationId: application.id } });
+    const assessments = await prisma.assessment.findMany({ where: { applicationId: application.id } });
+    expect(interviews).toHaveLength(1);
+    expect(assessments).toHaveLength(1);
+  });
+
+  it('supports multiple OAs and multiple interview rounds for the same application', async () => {
+    const application = await createAppliedApplication();
+
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-20T09:00:00' });
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-27T09:00:00', platform: 'Second round' });
+
+    await interviewReceivedWorkflow(prisma, application.id, {
+      action: 'interviewReceived',
+      stage: 'Recruiter Screen',
+      scheduledStart: '2026-08-01T14:00:00',
+      timezone: 'America/New_York',
+    });
+    await interviewReceivedWorkflow(prisma, application.id, {
+      action: 'interviewReceived',
+      stage: 'Technical Interview',
+      scheduledStart: '2026-08-05T14:00:00',
+      timezone: 'America/New_York',
+    });
+
+    const assessments = await prisma.assessment.findMany({ where: { applicationId: application.id } });
+    const interviews = await prisma.interview.findMany({ where: { applicationId: application.id } });
+    expect(assessments).toHaveLength(2);
+    expect(interviews).toHaveLength(2);
+    expect(interviews.map((i) => i.stage)).toEqual(['Recruiter Screen', 'Technical Interview']);
+  });
+
+  it('interprets an interview scheduled in Pacific time correctly, even though this test process runs in Eastern time', async () => {
+    const originalTz = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+      const application = await createAppliedApplication();
+      await interviewReceivedWorkflow(prisma, application.id, {
+        action: 'interviewReceived',
+        stage: 'Recruiter Screen',
+        scheduledStart: '2026-08-15T14:00', // 2:00 PM, meant as Pacific time
+        timezone: 'America/Los_Angeles',
+      });
+
+      const interview = await prisma.interview.findFirstOrThrow({ where: { applicationId: application.id } });
+      // 2:00 PM PDT (UTC-7) -> 21:00 UTC, NOT 18:00 UTC (which is what naively
+      // parsing "14:00" as the server's own Eastern time would produce).
+      expect(interview.scheduledStart?.toISOString()).toBe('2026-08-15T21:00:00.000Z');
+      expect(interview.timezone).toBe('America/Los_Angeles');
+    } finally {
+      process.env.TZ = originalTz;
+    }
   });
 });

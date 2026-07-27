@@ -34,6 +34,12 @@ model Application {
   whyFit            String?
   nextAction        String?
   nextActionDue     DateTime?
+  // Whether nextActionDue is a calendar date (e.g. copied from an offer's
+  // decisionDeadline) or a real timestamp (e.g. "one day before the
+  // interview") — tracked explicitly so the UI knows which formatter to use
+  // instead of guessing from the value itself (a timestamp can legitimately
+  // land on exact UTC midnight). See lib/dates.ts's `formatByKind`.
+  nextActionDueKind String          @default("timestamp")
   emailUsed         String?
   coverLetterStatus String?
   referralStatus    String?

@@ -1,13 +1,13 @@
 import { z } from 'zod';
-import { isDateOnlyString, isParseableDate } from '@/lib/dates';
+import { isDateOnlyString, isDateTimeLocalString, isValidIanaTimeZone } from '@/lib/dates';
 
 const emptyToUndefined = (value: unknown) => (typeof value === 'string' && value.trim() === '' ? undefined : value);
 
-// datetime-local values (and other real timestamps) — accepts anything that
-// parses to a valid instant, e.g. "2026-08-15T14:00" from an
-// `<input type="datetime-local">`, or a full ISO timestamp.
+// datetime-local values (and other real timestamps) — accepts a
+// "2026-08-15T14:00"-shaped value (or a full ISO timestamp) whose date and
+// time components are all real, e.g. rejects "2026-02-31T10:00".
 const optionalDateTimeString = () =>
-  z.preprocess(emptyToUndefined, z.string().trim().refine(isParseableDate, 'Valid date required').optional());
+  z.preprocess(emptyToUndefined, z.string().trim().refine(isDateTimeLocalString, 'Enter a valid date and time').optional());
 
 const requiredDateTimeString = (message: string) =>
   optionalDateTimeString().refine((value): value is string => value !== undefined, message);
@@ -28,12 +28,22 @@ const optionalUrlString = () =>
 const requiredUrlString = (message: string) =>
   optionalUrlString().refine((value): value is string => value !== undefined, message);
 
+const requiredIanaTimeZone = (message: string) =>
+  z.string().trim().refine(isValidIanaTimeZone, message);
+
+// The standard "New Opportunity" form can only create an application that
+// hasn't been submitted yet — everything past that (Applied, OA, interview
+// stages, Offer, ...) is reached exclusively through the matching workflow
+// action (see lib/workflow-policy.ts), which keeps status and currentStage
+// consistent (e.g. it's impossible to end up with Status: Applied and
+// Stage: Discovered). A future, separately-validated import pathway can
+// relax this later; this endpoint intentionally does not.
 export const applicationCreateSchema = z.object({
   company: z.string().trim().min(1, 'Company is required'),
   role: z.string().trim().min(1, 'Role is required'),
   applicationUrl: requiredUrlString('applicationUrl is required'),
   priority: z.enum(['P0', 'P1', 'P2', 'P3']),
-  status: z.enum(['Not Applied', 'Preparing', 'Applied', 'OA', 'Recruiter Screen', 'Technical Interview', 'Final Round', 'Offer', 'Accepted', 'Rejected', 'Withdrawn', 'Closed']).optional(),
+  status: z.enum(['Not Applied', 'Preparing']).optional(),
   currentStage: z.string().optional(),
   location: z.string().optional(),
   applicationDeadline: optionalDateOnlyString().nullable(),
@@ -83,9 +93,13 @@ const oaCompletedSchema = z.object({
 const interviewReceivedSchema = z.object({
   action: z.literal('interviewReceived'),
   stage: interviewStageSchema,
+  // scheduledStart/scheduledEnd are wall-clock times ("2026-08-15T14:00")
+  // with no timezone of their own — timezone is what tells us which instant
+  // that actually is (see parseZonedDateTime in lib/dates.ts), so it's
+  // required, not an afterthought.
   scheduledStart: requiredDateTimeString('scheduledStart is required'),
   scheduledEnd: optionalDateTimeString().nullable(),
-  timezone: z.string().optional().nullable(),
+  timezone: requiredIanaTimeZone('A valid IANA timezone is required'),
   format: z.string().optional().nullable(),
   durationMinutes: z.coerce.number().int().positive().optional(),
   location: z.string().optional().nullable(),

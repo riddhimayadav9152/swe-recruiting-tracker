@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { format, formatDistanceToNow, isBefore, subDays } from 'date-fns';
-import { formatDateOnly, formatFlexibleDate, formatTimestamp } from '@/lib/dates';
-import { getActionVisibility, hasSubmittedApplication, type TransitionAction } from '@/lib/workflow-policy';
+import { formatByKind, formatDateOnly, formatInZone, formatTimestamp, type DeadlineKind } from '@/lib/dates';
+import { getActionVisibility, isMissingApplicationDate, type TransitionAction } from '@/lib/workflow-policy';
 import { Activity, BriefcaseBusiness, CalendarDays, Download, FileText, FolderOpen, LayoutGrid, PlusCircle, Search, Settings, Users, FileStack, MessageSquareText } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { validateApplicationInput } from '@/lib/recruiting';
@@ -20,6 +20,7 @@ type ApplicationRecord = {
   location: string | null;
   nextAction: string | null;
   nextActionDue: string | null;
+  nextActionDueKind: 'date' | 'timestamp';
   applicationDeadline: string | null;
   dateFound: string | null;
   dateApplied: string | null;
@@ -29,7 +30,7 @@ type ApplicationRecord = {
   updatedAt: string;
   jobDescription: { fullText: string | null } | null;
   resumeVersion: { id: string; name: string } | null;
-  interviews: Array<{ id: string; stage: string; scheduledStart: string | null; completedAt: string | null; notes: string | null }>;
+  interviews: Array<{ id: string; stage: string; scheduledStart: string | null; timezone: string | null; completedAt: string | null; notes: string | null }>;
   assessments: Array<{ id: string; type: string; dueAt: string | null; completedAt: string | null; result: string | null }>;
   contacts: Array<{ name: string; email: string | null; notes: string | null }>;
   activities: Array<{ eventType: string; summary: string; createdAt: string }>;
@@ -79,6 +80,26 @@ const statusToneClass = (status: string) => {
 const FieldError = ({ errors, name }: { errors: Record<string, string[] | undefined>; name: string }) => {
   const message = errors[name]?.[0];
   return message ? <p className="text-sm text-rose-600">{message}</p> : null;
+};
+
+// Interview times must be interpreted in whichever IANA zone the user
+// actually picks, not wherever the server happens to be running — offer the
+// full list the runtime knows about rather than a curated (and inevitably
+// incomplete) subset.
+const IANA_TIME_ZONES: string[] = (() => {
+  try {
+    return Intl.supportedValuesOf('timeZone');
+  } catch {
+    return ['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles'];
+  }
+})();
+
+const browserTimeZone = (): string => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return 'UTC';
+  }
 };
 
 const sections = [
@@ -173,6 +194,11 @@ export default function TrackerShell() {
       id: app.id,
       label: app.nextActionDue ? `Next action • ${app.nextAction}` : `Deadline • ${app.company}`,
       dueDate: app.nextActionDue ?? app.applicationDeadline ?? null,
+      // applicationDeadline (the fallback when there's no nextActionDue) is
+      // always a calendar date; nextActionDue's kind is tracked explicitly
+      // per-application since it can be either, depending on which workflow
+      // last set it (see nextActionDueKind on the Application model).
+      dueDateKind: (app.nextActionDue ? app.nextActionDueKind : 'date') as DeadlineKind,
       company: app.company,
       role: app.role,
     }))
@@ -443,7 +469,7 @@ export default function TrackerShell() {
                               <p className="font-medium">{item.company}</p>
                               <p className="text-sm text-slate-500">{item.label}</p>
                             </div>
-                            <div className="text-sm text-slate-600">{item.dueDate ? formatFlexibleDate(item.dueDate, 'MMM d') : '—'}</div>
+                            <div className="text-sm text-slate-600">{item.dueDate ? formatByKind(item.dueDate, item.dueDateKind, 'MMM d') : '—'}</div>
                           </button>
                         ))}
                       </div>
@@ -488,7 +514,7 @@ export default function TrackerShell() {
                               <td className="px-3 py-3">{app.role}</td>
                               <td className="px-3 py-3"><span className={`rounded-full px-2 py-1 text-xs font-medium ${statusToneClass(app.status)}`}>{app.status}</span></td>
                               <td className="px-3 py-3">{app.nextAction}</td>
-                              <td className="px-3 py-3">{app.nextActionDue ? formatFlexibleDate(app.nextActionDue, 'MMM d') : '—'}</td>
+                              <td className="px-3 py-3">{app.nextActionDue ? formatByKind(app.nextActionDue, app.nextActionDueKind, 'MMM d') : '—'}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -514,7 +540,7 @@ export default function TrackerShell() {
                           {selectedApp.dateApplied && (
                             <div className="rounded-lg border border-violet-100 bg-white p-3">Date applied: <span data-testid="date-applied" className="font-medium text-slate-900">{formatDateOnly(selectedApp.dateApplied)}</span></div>
                           )}
-                          {hasSubmittedApplication(selectedApp.status) && !selectedApp.dateApplied && (
+                          {isMissingApplicationDate(selectedApp) && (
                             <div data-testid="missing-date-applied-warning" className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-amber-700">
                               This application is marked &ldquo;{selectedApp.status}&rdquo; but has no application date recorded — likely from an import. Consider adding one via Mark Applied.
                             </div>
@@ -534,7 +560,7 @@ export default function TrackerShell() {
                           {renderWorkflowButton(selectedApp, 'oaReceived', 'OA Received')}
                           {selectedApp.assessments.some((assessment) => assessment.type === 'OA' && !assessment.completedAt) &&
                             renderWorkflowButton(selectedApp, 'oaCompleted', 'OA Completed', { assessmentId: '' })}
-                          {renderWorkflowButton(selectedApp, 'interviewReceived', 'Interview Received')}
+                          {renderWorkflowButton(selectedApp, 'interviewReceived', 'Interview Received', { timezone: browserTimeZone() })}
                           {selectedApp.interviews.some((interview) => !interview.completedAt) &&
                             renderWorkflowButton(selectedApp, 'interviewCompleted', 'Interview Completed', { interviewId: '' })}
                           {renderWorkflowButton(selectedApp, 'reject', 'Rejected')}
@@ -577,7 +603,7 @@ export default function TrackerShell() {
                           <div className="font-medium">{item.company}</div>
                           <div className="text-slate-500">{item.label}</div>
                         </div>
-                        <div className="text-slate-600">{item.dueDate ? formatFlexibleDate(item.dueDate) : '—'}</div>
+                        <div className="text-slate-600">{item.dueDate ? formatByKind(item.dueDate, item.dueDateKind) : '—'}</div>
                       </div>
                     ))}
                   </div>
@@ -622,6 +648,14 @@ export default function TrackerShell() {
                       <div key={`${interview.appId}-${interview.stage}`} className="rounded-lg border border-violet-100 bg-white p-3 text-sm transition hover:border-violet-200 hover:bg-violet-50/50">
                         <div className="font-medium">{interview.company} • {interview.role}</div>
                         <div className="text-slate-500">{interview.stage}</div>
+                        {interview.scheduledStart && (
+                          <div className="text-slate-500">
+                            {formatInZone(interview.scheduledStart, interview.timezone)}
+                            {interview.timezone && interview.timezone !== browserTimeZone() && (
+                              <> ({formatTimestamp(interview.scheduledStart)} your time)</>
+                            )}
+                          </div>
+                        )}
                         <div className="text-slate-500">{interview.notes}</div>
                       </div>
                     ))}
@@ -831,8 +865,14 @@ export default function TrackerShell() {
                   <input id="duration-minutes" type="number" min="1" className="w-full rounded-lg border border-violet-200 bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100" value={quickForm.durationMinutes ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, durationMinutes: e.target.value }))} />
                   <FieldError errors={quickErrors} name="durationMinutes" />
                   <label className="block text-sm font-medium text-violet-900/80" htmlFor="interview-timezone">Time zone</label>
-                  <input id="interview-timezone" className="w-full rounded-lg border border-violet-200 bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100" placeholder="Time zone" value={quickForm.timezone ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, timezone: e.target.value }))} />
+                  <select id="interview-timezone" required className="w-full rounded-lg border border-violet-200 bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100" value={quickForm.timezone ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, timezone: e.target.value }))}>
+                    <option value="">Select a time zone</option>
+                    {IANA_TIME_ZONES.map((zone) => (
+                      <option key={zone} value={zone}>{zone.replace(/_/g, ' ')}</option>
+                    ))}
+                  </select>
                   <FieldError errors={quickErrors} name="timezone" />
+                  <p className="text-xs text-slate-500">Scheduled start/end above are interpreted in this time zone — not your device&apos;s time zone.</p>
                   <label className="block text-sm font-medium text-violet-900/80" htmlFor="interview-format">Format</label>
                   <input id="interview-format" className="w-full rounded-lg border border-violet-200 bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100" placeholder="Format" value={quickForm.format ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, format: e.target.value }))} />
                   <FieldError errors={quickErrors} name="format" />
@@ -918,7 +958,7 @@ export default function TrackerShell() {
                     <option value="">Select an interview</option>
                     {selectedApp.interviews.filter((interview) => !interview.completedAt).map((interview) => (
                       <option key={interview.id} value={interview.id}>
-                        {interview.stage} • {interview.scheduledStart ? formatTimestamp(interview.scheduledStart) : 'unscheduled'}
+                        {interview.stage} • {interview.scheduledStart ? formatInZone(interview.scheduledStart, interview.timezone) : 'unscheduled'}
                       </option>
                     ))}
                   </select>

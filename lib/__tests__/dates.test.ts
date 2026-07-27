@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  formatByKind,
   formatDateOnly,
-  formatFlexibleDate,
+  formatInZone,
   formatTimestamp,
   isDateOnlyString,
   isDateTimeLocalString,
+  isValidIanaTimeZone,
   parseDateOnly,
   parseDateTimeLocal,
   parseTimestamp,
+  parseZonedDateTime,
 } from '../dates';
 
 const TIME_ZONES = ['UTC', 'America/New_York', 'Pacific/Kiritimati', 'Pacific/Midway', 'Asia/Tokyo'];
@@ -33,7 +36,39 @@ describe('date-only vs datetime-local detection', () => {
   it('recognizes datetime-local strings', () => {
     expect(isDateTimeLocalString('2026-08-15T14:00')).toBe(true);
     expect(isDateTimeLocalString('2026-08-15T14:00:00')).toBe(true);
+    expect(isDateTimeLocalString('2026-08-15T14:00:00.000Z')).toBe(true);
     expect(isDateTimeLocalString('2026-08-15')).toBe(false);
+  });
+});
+
+describe('real calendar date validation', () => {
+  it('rejects impossible date-only values instead of letting them silently roll over', () => {
+    expect(isDateOnlyString('2026-02-31')).toBe(false);
+    expect(isDateOnlyString('2026-04-31')).toBe(false);
+    expect(isDateOnlyString('2026-13-01')).toBe(false);
+    expect(isDateOnlyString('2026-00-10')).toBe(false);
+    expect(isDateOnlyString('2026-01-00')).toBe(false);
+  });
+
+  it('rejects non-leap-year February 29 but accepts it in a leap year', () => {
+    expect(isDateOnlyString('2026-02-29')).toBe(false); // 2026 is not a leap year
+    expect(isDateOnlyString('2024-02-29')).toBe(true); // 2024 is a leap year
+    expect(isDateOnlyString('2000-02-29')).toBe(true); // divisible by 400 -> leap
+    expect(isDateOnlyString('1900-02-29')).toBe(false); // divisible by 100 but not 400 -> not leap
+  });
+
+  it('parseDateOnly returns null for impossible calendar dates', () => {
+    expect(parseDateOnly('2026-02-31')).toBeNull();
+    expect(parseDateOnly('2026-04-31')).toBeNull();
+    expect(parseDateOnly('2026-02-29')).toBeNull();
+    expect(parseDateOnly('2024-02-29')).not.toBeNull();
+  });
+
+  it('rejects impossible calendar dates and impossible times in datetime-local values', () => {
+    expect(isDateTimeLocalString('2026-02-31T10:00')).toBe(false);
+    expect(isDateTimeLocalString('2026-08-15T25:00')).toBe(false);
+    expect(isDateTimeLocalString('2026-08-15T10:70')).toBe(false);
+    expect(isDateTimeLocalString('2026-08-15T10:00:70')).toBe(false);
   });
 });
 
@@ -67,6 +102,63 @@ describe('parseDateOnly / parseDateTimeLocal / parseTimestamp', () => {
   });
 });
 
+describe('isValidIanaTimeZone', () => {
+  it('accepts real IANA identifiers', () => {
+    expect(isValidIanaTimeZone('America/New_York')).toBe(true);
+    expect(isValidIanaTimeZone('America/Los_Angeles')).toBe(true);
+    expect(isValidIanaTimeZone('UTC')).toBe(true);
+  });
+
+  it('rejects garbage input', () => {
+    expect(isValidIanaTimeZone('')).toBe(false);
+    expect(isValidIanaTimeZone('Not/AZone')).toBe(false);
+    expect(isValidIanaTimeZone('PDT')).toBe(false); // not a recognized zone identifier at all
+  });
+});
+
+describe('parseZonedDateTime interprets a wall-clock time in the SELECTED zone, not the server process timezone', () => {
+  const scenarios: Array<[string, string, string]> = [
+    ['America/New_York', '2026-08-15T14:00', '2026-08-15T18:00:00.000Z'], // 2pm EDT (UTC-4)
+    ['America/Los_Angeles', '2026-08-15T14:00', '2026-08-15T21:00:00.000Z'], // 2pm PDT (UTC-7)
+    ['UTC', '2026-08-15T14:00', '2026-08-15T14:00:00.000Z'],
+  ];
+
+  for (const [zone, input, expectedUtc] of scenarios) {
+    for (const serverTz of TIME_ZONES) {
+      it(`parses ${input} in ${zone} as ${expectedUtc}, regardless of the server running in ${serverTz}`, () => {
+        withTimeZone(serverTz, () => {
+          const parsed = parseZonedDateTime(input, zone);
+          expect(parsed?.toISOString()).toBe(expectedUtc);
+        });
+      });
+    }
+  }
+
+  it('a Pacific interview entered from a computer set to Eastern time still resolves to the correct UTC instant', () => {
+    withTimeZone('America/New_York', () => {
+      // The user is scheduling a 2:00 PM Pacific interview; the server
+      // process (and the browser, if the code ran there) happens to be set
+      // to Eastern time. The result must reflect Pacific time, not Eastern.
+      const parsed = parseZonedDateTime('2026-08-15T14:00', 'America/Los_Angeles');
+      expect(parsed?.toISOString()).toBe('2026-08-15T21:00:00.000Z');
+      // Sanity check this actually differs from naively parsing as local
+      // (Eastern) time, i.e. that the test would catch the regression.
+      const naive = new Date('2026-08-15T14:00');
+      expect(parsed?.getTime()).not.toBe(naive.getTime());
+    });
+  });
+
+  it('rejects an invalid IANA timezone', () => {
+    expect(parseZonedDateTime('2026-08-15T14:00', 'Not/AZone')).toBeNull();
+    expect(parseZonedDateTime('2026-08-15T14:00', '')).toBeNull();
+  });
+
+  it('rejects a missing or non-string value', () => {
+    expect(parseZonedDateTime(undefined, 'America/New_York')).toBeNull();
+    expect(parseZonedDateTime('', 'America/New_York')).toBeNull();
+  });
+});
+
 describe('formatDateOnly displays the same calendar day in every timezone', () => {
   const stored = parseDateOnly('2026-08-15')!;
 
@@ -93,19 +185,67 @@ describe('formatTimestamp reads the local wall-clock time', () => {
   });
 });
 
-describe('formatFlexibleDate auto-detects date-only vs timestamp', () => {
-  for (const tz of TIME_ZONES) {
-    it(`formats a UTC-midnight value as a date-only value in ${tz}`, () => {
+describe('formatInZone formats a stored instant in a specific IANA zone, independent of the viewer', () => {
+  it('shows the interview\'s own zone regardless of the server/viewer timezone', () => {
+    const utcInstant = parseZonedDateTime('2026-08-15T14:00', 'America/Los_Angeles')!;
+    for (const tz of TIME_ZONES) {
       withTimeZone(tz, () => {
-        const dateOnly = parseDateOnly('2026-08-15')!;
-        expect(formatFlexibleDate(dateOnly)).toBe('Aug 15, 2026');
+        expect(formatInZone(utcInstant, 'America/Los_Angeles')).toBe('Aug 15, 2026 2:00 PM PDT');
       });
-    });
-  }
+    }
+  });
 
-  it('formats a genuine timestamp using local time, not UTC extraction', () => {
-    const timestamp = parseDateTimeLocal('2026-08-15T23:30')!;
-    expect(formatFlexibleDate(timestamp)).toBe(formatTimestamp(timestamp, 'MMM d, yyyy'));
+  it('falls back to local formatting for a missing/invalid timezone rather than throwing', () => {
+    const utcInstant = parseDateTimeLocal('2026-08-15T14:00')!;
+    expect(formatInZone(utcInstant, null)).not.toBe('—');
+    expect(formatInZone(utcInstant, 'Not/AZone')).not.toBe('—');
+  });
+
+  it('returns an em dash for null/undefined/invalid values', () => {
+    expect(formatInZone(null, 'America/New_York')).toBe('—');
+    expect(formatInZone('not-a-date', 'America/New_York')).toBe('—');
+  });
+});
+
+describe('formatByKind dispatches on an explicit kind rather than inferring it from the value', () => {
+  it('formats a "date" kind using UTC-safe date-only extraction', () => {
+    const dateOnly = parseDateOnly('2026-08-15')!;
+    expect(formatByKind(dateOnly, 'date')).toBe('Aug 15, 2026');
+  });
+
+  it('formats a "timestamp" kind using local time, even when it lands exactly on UTC midnight', () => {
+    // Regression case: an OA due at 8:00 PM America/New_York during daylight
+    // saving time serializes to exactly midnight UTC. The old heuristic
+    // (inferring "date-only" from UTC-midnight) would have mis-rendered
+    // this; explicit `kind` must not be fooled by the coincidence.
+    const dueAt = parseZonedDateTime('2026-08-15T20:00', 'America/New_York')!;
+    expect(dueAt.toISOString()).toBe('2026-08-16T00:00:00.000Z'); // confirms the UTC-midnight setup
+
+    withTimeZone('America/New_York', () => {
+      expect(formatByKind(dueAt, 'timestamp')).toBe(formatTimestamp(dueAt));
+      expect(formatByKind(dueAt, 'timestamp')).toMatch(/Aug 15, 2026 8:00 PM/);
+    });
+    withTimeZone('UTC', () => {
+      // Viewed from UTC, the same instant is legitimately the next day —
+      // proving this is being treated as a real timestamp, not silently
+      // re-anchored to a fixed calendar day the way a date-only value would be.
+      expect(formatByKind(dueAt, 'timestamp')).toMatch(/Aug 16, 2026 12:00 AM/);
+    });
+  });
+
+  it('a real timestamp at UTC midnight is NOT reformatted as a fixed calendar day', () => {
+    const utcMidnightTimestamp = new Date('2026-08-16T00:00:00.000Z');
+    withTimeZone('Pacific/Kiritimati', () => {
+      // UTC+14: this instant is already Aug 16, 14:00 local.
+      expect(formatByKind(utcMidnightTimestamp, 'timestamp')).toMatch(/Aug 16, 2026 2:00 PM/);
+    });
+    withTimeZone('Pacific/Midway', () => {
+      // UTC-11: this instant is Aug 15, 13:00 local — a DIFFERENT calendar
+      // day than in Kiritimati above, exactly as a real timestamp should
+      // behave and exactly what the old date-only heuristic would have
+      // gotten wrong (it would have shown "Aug 16" in both zones).
+      expect(formatByKind(utcMidnightTimestamp, 'timestamp')).toMatch(/Aug 15, 2026 1:00 PM/);
+    });
   });
 });
 
