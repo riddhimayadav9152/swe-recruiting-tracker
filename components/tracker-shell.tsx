@@ -88,8 +88,14 @@ const FieldError = ({ errors, name }: { errors: Record<string, string[] | undefi
 // full list the runtime knows about rather than a curated (and inevitably
 // incomplete) subset.
 const IANA_TIME_ZONES: string[] = (() => {
+  // `Intl.supportedValuesOf('timeZone')` omits the plain "UTC" identifier
+  // even in a runtime whose OWN resolved timezone is exactly "UTC" (e.g. any
+  // CI runner/container defaulting to UTC) — so a <select> built from it
+  // can't represent the very value `browserTimeZone()` defaults to there,
+  // silently failing to select anything. Always include it explicitly.
   try {
-    return Intl.supportedValuesOf('timeZone');
+    const zones = Intl.supportedValuesOf('timeZone');
+    return zones.includes('UTC') ? zones : ['UTC', ...zones];
   } catch {
     return ['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles'];
   }
