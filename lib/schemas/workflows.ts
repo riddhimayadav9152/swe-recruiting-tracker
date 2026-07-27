@@ -38,13 +38,16 @@ const requiredIanaTimeZone = (message: string) =>
 // consistent (e.g. it's impossible to end up with Status: Applied and
 // Stage: Discovered). A future, separately-validated import pathway can
 // relax this later; this endpoint intentionally does not.
+// currentStage is deliberately NOT a field here — it's always derived from
+// `status` (see deriveInitialStage in lib/recruiting.ts), never accepted
+// from the client. Zod strips unknown keys by default, so a client that
+// still sends currentStage has it silently ignored rather than honored.
 export const applicationCreateSchema = z.object({
   company: z.string().trim().min(1, 'Company is required'),
   role: z.string().trim().min(1, 'Role is required'),
   applicationUrl: requiredUrlString('applicationUrl is required'),
   priority: z.enum(['P0', 'P1', 'P2', 'P3']),
   status: z.enum(['Not Applied', 'Preparing']).optional(),
-  currentStage: z.string().optional(),
   location: z.string().optional(),
   applicationDeadline: optionalDateOnlyString().nullable(),
   dateFound: optionalDateOnlyString().nullable(),
@@ -68,6 +71,11 @@ const oaReceivedSchema = z.object({
   action: z.literal('oaReceived'),
   receivedAt: optionalDateTimeString(),
   dueAt: requiredDateTimeString('dueAt is required'),
+  // dueAt/receivedAt are wall-clock times with no timezone of their own —
+  // timezone is what tells us which instant that actually is (see
+  // parseZonedDateTime in lib/dates.ts), same as an interview's
+  // scheduledStart/scheduledEnd.
+  timezone: requiredIanaTimeZone('A valid IANA timezone is required'),
   platform: z.string().optional(),
   durationMinutes: z.coerce.number().int().positive().optional(),
   questionCount: z.coerce.number().int().positive().optional(),
@@ -157,6 +165,11 @@ const contactSchema = z.object({
   nextFollowUp: optionalDateOnlyString(),
 });
 
+const setApplicationDateSchema = z.object({
+  action: z.literal('setApplicationDate'),
+  dateApplied: requiredDateOnlyString('dateApplied is required'),
+});
+
 const descriptionSchema = z.object({
   action: z.literal('description'),
   fullText: z.string().optional(),
@@ -176,6 +189,7 @@ export const workflowPayloadSchema = z.discriminatedUnion('action', [
   noteSchema,
   contactSchema,
   descriptionSchema,
+  setApplicationDateSchema,
 ]);
 
 export type ApplyPayload = z.infer<typeof applySchema>;
@@ -188,4 +202,5 @@ export type OfferPayload = z.infer<typeof offerSchema>;
 export type NotePayload = z.infer<typeof noteSchema>;
 export type ContactPayload = z.infer<typeof contactSchema>;
 export type DescriptionPayload = z.infer<typeof descriptionSchema>;
+export type SetApplicationDatePayload = z.infer<typeof setApplicationDateSchema>;
 export type WorkflowPayload = z.infer<typeof workflowPayloadSchema>;

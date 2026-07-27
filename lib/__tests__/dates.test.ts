@@ -6,6 +6,7 @@ import {
   formatTimestamp,
   isDateOnlyString,
   isDateTimeLocalString,
+  isDeadlineOverdue,
   isValidIanaTimeZone,
   parseDateOnly,
   parseDateTimeLocal,
@@ -246,6 +247,69 @@ describe('formatByKind dispatches on an explicit kind rather than inferring it f
       // gotten wrong (it would have shown "Aug 16" in both zones).
       expect(formatByKind(utcMidnightTimestamp, 'timestamp')).toMatch(/Aug 15, 2026 1:00 PM/);
     });
+  });
+});
+
+describe('isDeadlineOverdue', () => {
+  it('compares timestamp-kind values as exact instants', () => {
+    const value = new Date('2026-08-15T12:00:00.000Z');
+    expect(isDeadlineOverdue(value, 'timestamp', 'America/New_York', new Date('2026-08-15T11:59:59.000Z'))).toBe(false);
+    expect(isDeadlineOverdue(value, 'timestamp', 'America/New_York', new Date('2026-08-15T12:00:00.000Z'))).toBe(false);
+    expect(isDeadlineOverdue(value, 'timestamp', 'America/New_York', new Date('2026-08-15T12:00:01.000Z'))).toBe(true);
+  });
+
+  it('never marks an August 15 calendar deadline overdue on August 14 in America/New_York', () => {
+    const deadline = parseDateOnly('2026-08-15')!;
+    // 4:00 PM EDT on the 14th — clearly still August 14 in New York, and
+    // would be wrongly flagged overdue by a naive `new Date(deadline) < now`
+    // comparison in any timezone behind UTC.
+    const aug14Evening = new Date('2026-08-14T20:00:00.000Z');
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', aug14Evening)).toBe(false);
+  });
+
+  it('does not mark a date-kind deadline overdue at any point during its own calendar day in America/New_York', () => {
+    const deadline = parseDateOnly('2026-08-15')!;
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', new Date('2026-08-15T04:00:00.000Z'))).toBe(false); // 12:00 AM EDT
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', new Date('2026-08-16T03:59:59.000Z'))).toBe(false); // 11:59:59 PM EDT
+  });
+
+  it('marks a date-kind deadline overdue exactly once the next calendar day begins in America/New_York', () => {
+    const deadline = parseDateOnly('2026-08-15')!;
+    // August 16, 12:00 AM EDT (UTC-4) is 2026-08-16T04:00:00Z.
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', new Date('2026-08-16T03:59:59.000Z'))).toBe(false);
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', new Date('2026-08-16T04:00:00.000Z'))).toBe(true);
+  });
+
+  it('treats a date-kind deadline as due at UTC midnight when userTimeZone is UTC', () => {
+    const deadline = parseDateOnly('2026-08-15')!;
+    expect(isDeadlineOverdue(deadline, 'date', 'UTC', new Date('2026-08-15T23:59:59.000Z'))).toBe(false);
+    expect(isDeadlineOverdue(deadline, 'date', 'UTC', new Date('2026-08-16T00:00:00.000Z'))).toBe(true);
+  });
+
+  it('accounts for a spring-forward DST transition in the boundary calculation', () => {
+    // US DST begins 2026-03-08 at 2:00 AM local (America/New_York). A
+    // deadline dated the day before the change is still due at the
+    // following midnight — which, by then, already observes EDT (UTC-4),
+    // not the EST (UTC-5) offset the deadline's own day started under.
+    const deadline = parseDateOnly('2026-03-08')!;
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', new Date('2026-03-09T03:59:59.000Z'))).toBe(false);
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', new Date('2026-03-09T04:00:00.000Z'))).toBe(true);
+  });
+
+  it('accounts for a fall-back DST transition in the boundary calculation', () => {
+    // US DST ends 2026-11-01 at 2:00 AM local — midnight that day is still
+    // EDT (UTC-4); the clocks don't fall back to EST until 2:00 AM.
+    const deadline = parseDateOnly('2026-10-31')!;
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', new Date('2026-11-01T03:59:59.000Z'))).toBe(false);
+    expect(isDeadlineOverdue(deadline, 'date', 'America/New_York', new Date('2026-11-01T04:00:00.000Z'))).toBe(true);
+  });
+
+  it('returns false for a null/undefined value and falls back to UTC for an invalid timezone', () => {
+    expect(isDeadlineOverdue(null, 'date', 'America/New_York')).toBe(false);
+    expect(isDeadlineOverdue(undefined, 'timestamp', 'America/New_York')).toBe(false);
+    const deadline = parseDateOnly('2026-08-15')!;
+    expect(isDeadlineOverdue(deadline, 'date', 'Not/AZone', new Date('2026-08-15T23:59:59.000Z'))).toBe(false);
+    expect(isDeadlineOverdue(deadline, 'date', 'Not/AZone', new Date('2026-08-16T00:00:00.000Z'))).toBe(true);
   });
 });
 

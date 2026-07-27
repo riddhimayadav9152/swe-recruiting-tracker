@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { addMinutes, subDays } from 'date-fns';
-import { generateApplicationCode, generateNextAction } from '@/lib/recruiting';
+import { deriveInitialStage, generateApplicationCode, generateNextAction } from '@/lib/recruiting';
 import { parseDateOnly, parseDateTimeLocal, parseZonedDateTime } from '@/lib/dates';
 import { assertActionAllowed } from '@/lib/workflow-policy';
 import type {
@@ -12,6 +12,7 @@ import type {
   OaReceivedPayload,
   OfferPayload,
   RejectPayload,
+  SetApplicationDatePayload,
 } from '@/lib/schemas/workflows';
 
 // Every workflow function opens its own `$transaction`, so it always needs the
@@ -39,8 +40,15 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
   role: string;
   applicationUrl: string;
   priority: string;
+  // Any valid status is accepted here — it's the caller's job to restrict
+  // this further if needed. The standard "New Opportunity" endpoint only
+  // ever passes 'Not Applied'/'Preparing' (enforced by
+  // applicationCreateSchema); the separately-validated import pathway is
+  // allowed to pass any status, since it's re-creating already-advanced
+  // historical records. There is deliberately no `currentStage` input —
+  // it's always derived from `status` via `deriveInitialStage` so status and
+  // stage can never drift out of sync, regardless of caller.
   status?: string;
-  currentStage?: string | null;
   location?: string | null;
   applicationDeadline?: string | null;
   dateFound?: string | null;
@@ -48,7 +56,7 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
 }, existingCodes: string[] = []) {
   const applicationCode = generateApplicationCode(input.company, input.role, new Date(), existingCodes);
   const initialStatus = input.status ?? 'Not Applied';
-  const initialStage = input.currentStage ?? 'Discovered';
+  const initialStage = deriveInitialStage(initialStatus as Parameters<typeof deriveInitialStage>[0]);
   const dateFound = input.dateFound ? parseDateOnly(input.dateFound) ?? new Date() : new Date();
   const nextActionDue = input.applicationDeadline ? parseDateOnly(input.applicationDeadline) ?? new Date(Date.now() + 2 * 86400000) : new Date(Date.now() + 2 * 86400000);
   const nextActionDueKind: 'date' | 'timestamp' = input.applicationDeadline ? 'date' : 'timestamp';
@@ -137,6 +145,14 @@ export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: 
   if (!existing) throw new Error('Application not found');
   assertActionAllowed(existing.status, 'oaReceived', payload.override === true);
 
+  // dueAt/receivedAt are wall-clock times with no timezone of their own —
+  // interpret them in the assessment's own selected IANA timezone, never the
+  // server process's timezone (see parseZonedDateTime in lib/dates.ts).
+  const dueAt = parseZonedDateTime(payload.dueAt, payload.timezone);
+  if (!dueAt) throw new Error('dueAt is required');
+  const receivedAt = payload.receivedAt ? parseZonedDateTime(payload.receivedAt, payload.timezone) : null;
+  const nextActionDue = payload.nextActionDue ? parseZonedDateTime(payload.nextActionDue, payload.timezone) ?? dueAt : dueAt;
+
   return prisma.$transaction(async (tx) => {
     const updated = await tx.application.update({
       where: { id: applicationId },
@@ -144,7 +160,7 @@ export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: 
         status: 'OA',
         currentStage: 'Online Assessment',
         nextAction: 'Prepare for and complete OA',
-        nextActionDue: payload.nextActionDue ? parseDateTimeLocal(payload.nextActionDue) ?? new Date(payload.dueAt) : parseDateTimeLocal(payload.dueAt) ?? new Date(payload.dueAt),
+        nextActionDue,
         nextActionDueKind: 'timestamp',
       },
     });
@@ -153,8 +169,9 @@ export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: 
       data: {
         applicationId,
         type: 'OA',
-        receivedAt: payload.receivedAt ? parseDateTimeLocal(payload.receivedAt) : null,
-        dueAt: parseDateTimeLocal(payload.dueAt),
+        receivedAt,
+        dueAt,
+        timezone: payload.timezone,
         platform: payload.platform ?? null,
         durationMinutes: payload.durationMinutes ?? null,
         questionCount: payload.questionCount ?? null,
@@ -435,6 +452,45 @@ export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: strin
         previousStage: existing.currentStage,
         newStage: 'Offer Received',
         summary: 'Recorded offer',
+        metadataJson: JSON.stringify(payload),
+      },
+    });
+
+    return updated;
+  });
+}
+
+// Repairs a record that is missing its application date — the only way this
+// can legitimately happen today is an imported historical row (the standard
+// "Mark Applied" workflow always sets dateApplied, defaulting to "now" if
+// the caller didn't supply one; see applyWorkflow above). This never changes
+// status/stage, so like contacts/notes it isn't gated by
+// lib/workflow-policy.ts — but it only ever fills in a genuinely missing
+// date, never overwrites one that's already set, to avoid quietly
+// corrupting a real (if unusual) application date.
+export async function setApplicationDateWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: SetApplicationDatePayload) {
+  const existing = await prisma.application.findUnique({ where: { id: applicationId } });
+  if (!existing) throw new Error('Application not found');
+  if (existing.dateApplied) throw new Error('This application already has a date applied on record');
+
+  const dateApplied = parseDateOnly(payload.dateApplied);
+  if (!dateApplied) throw new Error('A valid application date is required');
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.application.update({
+      where: { id: applicationId },
+      data: { dateApplied },
+    });
+
+    await tx.activity.create({
+      data: {
+        applicationId,
+        eventType: 'Application date repaired',
+        previousStatus: existing.status,
+        newStatus: existing.status,
+        previousStage: existing.currentStage,
+        newStage: existing.currentStage,
+        summary: `Set missing application date to ${payload.dateApplied}`,
         metadataJson: JSON.stringify(payload),
       },
     });

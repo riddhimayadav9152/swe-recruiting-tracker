@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { format, formatDistanceToNow, isBefore, subDays } from 'date-fns';
-import { formatByKind, formatDateOnly, formatInZone, formatTimestamp, type DeadlineKind } from '@/lib/dates';
+import { format, formatDistanceToNow } from 'date-fns';
+import { formatByKind, formatDateOnly, formatInZone, formatTimestamp, isDeadlineOverdue, type DeadlineKind } from '@/lib/dates';
 import { getActionVisibility, isMissingApplicationDate, type TransitionAction } from '@/lib/workflow-policy';
 import { Activity, BriefcaseBusiness, CalendarDays, Download, FileText, FolderOpen, LayoutGrid, PlusCircle, Search, Settings, Users, FileStack, MessageSquareText } from 'lucide-react';
 import { toast } from 'react-hot-toast';
@@ -31,7 +31,7 @@ type ApplicationRecord = {
   jobDescription: { fullText: string | null } | null;
   resumeVersion: { id: string; name: string } | null;
   interviews: Array<{ id: string; stage: string; scheduledStart: string | null; timezone: string | null; completedAt: string | null; notes: string | null }>;
-  assessments: Array<{ id: string; type: string; dueAt: string | null; completedAt: string | null; result: string | null }>;
+  assessments: Array<{ id: string; type: string; dueAt: string | null; timezone: string | null; completedAt: string | null; result: string | null }>;
   contacts: Array<{ name: string; email: string | null; notes: string | null }>;
   activities: Array<{ eventType: string; summary: string; createdAt: string }>;
   offers: { offerDate: string | null; decisionDeadline: string | null; compensationSummary: string | null; notes: string | null } | null;
@@ -41,7 +41,7 @@ type ResumeRecord = { id:string; name:string; targetType:string; fileName:string
 
 type ProfileRecord = { id:string; name:string; school:string; major:string; graduation:string; preferredLocation:string; currentExperience:string; targetRoles:string; targetCategories:string };
 
-type QuickAction = 'apply' | 'oaReceived' | 'oaCompleted' | 'interviewReceived' | 'interviewCompleted' | 'reject' | 'offer' | 'note' | 'contact';
+type QuickAction = 'apply' | 'oaReceived' | 'oaCompleted' | 'interviewReceived' | 'interviewCompleted' | 'reject' | 'offer' | 'note' | 'contact' | 'setApplicationDate';
 
 const quickActionTitles: Record<QuickAction, string> = {
   apply: 'Mark Applied',
@@ -53,6 +53,7 @@ const quickActionTitles: Record<QuickAction, string> = {
   offer: 'Offer Received',
   note: 'Add Note',
   contact: 'Add Contact',
+  setApplicationDate: 'Set Application Date',
 };
 
 const statusToneClass = (status: string) => {
@@ -133,6 +134,7 @@ export default function TrackerShell() {
   const [quickForm, setQuickForm] = useState<Record<string, string>>({});
   const [quickErrors, setQuickErrors] = useState<Record<string, string[] | undefined>>({});
   const [pendingOverride, setPendingOverride] = useState(false);
+  const [importErrors, setImportErrors] = useState<Array<{ row: number; company: string; errors: string[] }>>([]);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -175,7 +177,8 @@ export default function TrackerShell() {
   }, [applications, search]);
 
   const summary = useMemo(() => {
-    const overdue = applications.filter((app) => app.nextActionDue && isBefore(new Date(app.nextActionDue), new Date())).length;
+    const userTimeZone = browserTimeZone();
+    const overdue = applications.filter((app) => isDeadlineOverdue(app.nextActionDue, app.nextActionDueKind, userTimeZone)).length;
     return {
       total: applications.length,
       notApplied: applications.filter((app) => app.status === 'Not Applied').length,
@@ -329,16 +332,23 @@ export default function TrackerShell() {
   const importFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    setImportErrors([]);
     const formData = new FormData();
     formData.append('file', file);
     const response = await fetch('/api/import', { method: 'POST', body: formData });
     const data = await response.json();
     if (response.ok) {
-      toast.success(`Imported ${data.imported} rows`);
+      setImportErrors(data.errors ?? []);
+      if (data.errors?.length) {
+        toast.error(`Imported ${data.imported} rows, ${data.errors.length} row(s) failed — see the report below`);
+      } else {
+        toast.success(`Imported ${data.imported} rows`);
+      }
       loadData();
     } else {
       toast.error('Import failed');
     }
+    event.target.value = '';
   };
 
   const backupDatabase = async () => {
@@ -477,7 +487,7 @@ export default function TrackerShell() {
                     <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
                       <h3 className="text-lg font-semibold">Needs attention</h3>
                       <div className="mt-4 space-y-3">
-                        {applications.filter((app) => (app.nextActionDue && isBefore(new Date(app.nextActionDue), new Date())) || !app.jobDescription || !app.resumeVersion || (app.nextActionDue && new Date(app.nextActionDue) < subDays(new Date(), 3))).slice(0, 6).map((app) => (
+                        {applications.filter((app) => isDeadlineOverdue(app.nextActionDue, app.nextActionDueKind, browserTimeZone()) || !app.jobDescription || !app.resumeVersion).slice(0, 6).map((app) => (
                           <div key={app.id} className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-sm">
                             <div className="font-medium">{app.company}</div>
                             <div className="text-amber-800">{app.nextAction ?? 'Review this opportunity'}</div>
@@ -542,7 +552,13 @@ export default function TrackerShell() {
                           )}
                           {isMissingApplicationDate(selectedApp) && (
                             <div data-testid="missing-date-applied-warning" className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-amber-700">
-                              This application is marked &ldquo;{selectedApp.status}&rdquo; but has no application date recorded — likely from an import. Consider adding one via Mark Applied.
+                              <p>This application is marked &ldquo;{selectedApp.status}&rdquo; but has no application date recorded — likely from an import.</p>
+                              <button
+                                onClick={() => openQuickAction('setApplicationDate')}
+                                className="mt-2 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium text-amber-800 transition hover:bg-amber-100"
+                              >
+                                Set Application Date
+                              </button>
                             </div>
                           )}
                           {selectedApp.offers && (
@@ -557,7 +573,7 @@ export default function TrackerShell() {
                         </div>
                         <div className="mt-4 flex flex-wrap gap-2">
                           {renderWorkflowButton(selectedApp, 'apply', 'Mark Applied', { resumeVersionId: selectedApp.resumeVersion?.id ?? '' })}
-                          {renderWorkflowButton(selectedApp, 'oaReceived', 'OA Received')}
+                          {renderWorkflowButton(selectedApp, 'oaReceived', 'OA Received', { timezone: browserTimeZone() })}
                           {selectedApp.assessments.some((assessment) => assessment.type === 'OA' && !assessment.completedAt) &&
                             renderWorkflowButton(selectedApp, 'oaCompleted', 'OA Completed', { assessmentId: '' })}
                           {renderWorkflowButton(selectedApp, 'interviewReceived', 'Interview Received', { timezone: browserTimeZone() })}
@@ -645,7 +661,7 @@ export default function TrackerShell() {
                   <h3 className="text-lg font-semibold">Interviews</h3>
                   <div className="mt-4 space-y-3">
                     {applications.flatMap((app) => app.interviews.map((interview) => ({ ...interview, company: app.company, role: app.role, appId: app.id }))).map((interview) => (
-                      <div key={`${interview.appId}-${interview.stage}`} className="rounded-lg border border-[#ffcad4] bg-white p-3 text-sm transition hover:border-[#ffc4d6] hover:bg-[#fadde1]/50">
+                      <div key={interview.id} className="rounded-lg border border-[#ffcad4] bg-white p-3 text-sm transition hover:border-[#ffc4d6] hover:bg-[#fadde1]/50">
                         <div className="font-medium">{interview.company} • {interview.role}</div>
                         <div className="text-slate-500">{interview.stage}</div>
                         {interview.scheduledStart && (
@@ -720,9 +736,23 @@ export default function TrackerShell() {
                   </div>
                   <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
                     <h3 className="text-lg font-semibold">Import</h3>
+                    <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                      <p className="font-semibold">⚠ Experimental — back up your database first</p>
+                      <p className="mt-1">Download a SQLite backup above before importing. This importer is still being hardened and is not yet recommended for your canonical tracker data — review the row report below carefully after every import.</p>
+                    </div>
                     <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="import-file">Tracker workbook file</label>
                     <input id="import-file" type="file" accept=".xlsx,.xls" onChange={importFile} className="mt-2 block w-full text-sm" />
                     <p className="mt-3 text-sm text-slate-500">Upload an existing tracker workbook to import applications.</p>
+                    {importErrors.length > 0 && (
+                      <div className="mt-4 space-y-2">
+                        <p className="text-sm font-medium text-rose-700">{importErrors.length} row(s) could not be imported:</p>
+                        {importErrors.map((rowError) => (
+                          <div key={rowError.row} data-testid="import-row-error" className="rounded-lg border border-rose-100 bg-rose-50 p-2 text-xs text-rose-700">
+                            Row {rowError.row} ({rowError.company}): {rowError.errors.join('; ')}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -837,6 +867,15 @@ export default function TrackerShell() {
                   <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="oa-due-at">Due at</label>
                   <input id="oa-due-at" required type="datetime-local" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={quickForm.dueAt ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dueAt: e.target.value }))} />
                   <FieldError errors={quickErrors} name="dueAt" />
+                  <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="oa-timezone">Time zone</label>
+                  <select id="oa-timezone" required className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={quickForm.timezone ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, timezone: e.target.value }))}>
+                    <option value="">Select a time zone</option>
+                    {IANA_TIME_ZONES.map((zone) => (
+                      <option key={zone} value={zone}>{zone.replace(/_/g, ' ')}</option>
+                    ))}
+                  </select>
+                  <FieldError errors={quickErrors} name="timezone" />
+                  <p className="text-xs text-slate-500">Received at/due at above are interpreted in this time zone — not your device&apos;s time zone.</p>
                   <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="oa-platform">Platform</label>
                   <input id="oa-platform" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Platform" value={quickForm.platform ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, platform: e.target.value }))} />
                   <FieldError errors={quickErrors} name="platform" />
@@ -923,7 +962,8 @@ export default function TrackerShell() {
                     <option value="">Select an assessment</option>
                     {selectedApp.assessments.filter((assessment) => !assessment.completedAt).map((assessment) => (
                       <option key={assessment.id} value={assessment.id}>
-                        {assessment.type} • due {assessment.dueAt ? formatTimestamp(assessment.dueAt, 'MMM d, yyyy') : 'unknown'}
+                        {assessment.type} • due {assessment.dueAt ? formatInZone(assessment.dueAt, assessment.timezone, 'MMM d, yyyy h:mm a zzz') : 'unknown'}
+                        {assessment.dueAt && assessment.timezone && assessment.timezone !== browserTimeZone() ? ` (${formatTimestamp(assessment.dueAt, 'MMM d, h:mm a')} your time)` : ''}
                       </option>
                     ))}
                   </select>
@@ -991,6 +1031,14 @@ export default function TrackerShell() {
                   <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="note-content">Note</label>
                   <textarea id="note-content" required className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" rows={4} placeholder="Add a note" value={quickForm.content ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, content: e.target.value }))} />
                   <FieldError errors={quickErrors} name="content" />
+                </>
+              )}
+              {quickAction === 'setApplicationDate' && (
+                <>
+                  <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="repair-date-applied">Application date</label>
+                  <input id="repair-date-applied" required type="date" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={quickForm.dateApplied ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dateApplied: e.target.value }))} />
+                  <FieldError errors={quickErrors} name="dateApplied" />
+                  <p className="text-xs text-slate-500">Records this as a repair to the application history rather than a new submission.</p>
                 </>
               )}
               {quickAction === 'contact' && (

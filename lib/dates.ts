@@ -181,3 +181,50 @@ export type DeadlineKind = 'date' | 'timestamp';
 
 export const formatByKind = (value: Date | string | null | undefined, kind: DeadlineKind, pattern?: string): string =>
   kind === 'date' ? formatDateOnly(value, pattern) : formatTimestamp(value, pattern);
+
+const pad2 = (value: number): string => String(value).padStart(2, '0');
+
+/**
+ * Whether a deadline-shaped value (see `DeadlineKind`) counts as overdue
+ * right now.
+ *
+ * - `timestamp` values are compared as exact instants — no timezone
+ *   ambiguity, since they already represent a specific moment.
+ * - `date` values are calendar dates with no time component, so "overdue"
+ *   only becomes true once the *entire* calendar day has elapsed in
+ *   `userTimeZone` — an August 15 deadline is due at the end of August 15 in
+ *   the user's zone, not at UTC midnight on the 15th. Comparing calendar
+ *   dates naively (e.g. `new Date(deadline) < new Date()`) would mark an
+ *   August 15 deadline overdue as early as August 14 evening for anyone west
+ *   of UTC, which is exactly the bug this helper exists to prevent.
+ */
+export const isDeadlineOverdue = (
+  value: Date | string | null | undefined,
+  kind: DeadlineKind,
+  userTimeZone: string,
+  now: Date = new Date(),
+): boolean => {
+  if (!value) return false;
+  const date = typeof value === 'string' ? new Date(value) : value;
+  if (Number.isNaN(date.getTime())) return false;
+
+  if (kind === 'timestamp') return date.getTime() < now.getTime();
+
+  // `date`-kind values are anchored at UTC midnight by `parseDateOnly`, so
+  // their intended calendar day lives in the UTC fields, not the local ones.
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+
+  const zone = isValidIanaTimeZone(userTimeZone) ? userTimeZone : 'UTC';
+  // The deadline's calendar day ends the moment the *next* day begins in the
+  // user's timezone — construct that next-day boundary as a naive
+  // datetime-local string and interpret it in `zone` (via
+  // `parseZonedDateTime`) to get the correct UTC instant, handling
+  // month/year rollover for free via the UTC Date constructor.
+  const nextDayUtc = new Date(Date.UTC(year, month, day + 1));
+  const nextDayString = `${nextDayUtc.getUTCFullYear()}-${pad2(nextDayUtc.getUTCMonth() + 1)}-${pad2(nextDayUtc.getUTCDate())}T00:00:00`;
+  const endOfDeadlineDay = parseZonedDateTime(nextDayString, zone) ?? nextDayUtc;
+
+  return now.getTime() >= endOfDeadlineDay.getTime();
+};

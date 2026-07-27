@@ -93,6 +93,13 @@ model Assessment {
   platform        String?
   receivedAt      DateTime?
   dueAt           DateTime?
+  // IANA timezone the assessment's due date was entered in (e.g.
+  // "America/New_York"), so dueAt — a wall-clock deadline, not an
+  // instantaneous event — can be interpreted and displayed correctly
+  // regardless of the viewer's own timezone. Nullable for assessments
+  // created before this field existed; new ones always set it (defaulting
+  // to the browser's timezone in the UI).
+  timezone        String?
   completedAt     DateTime?
   durationMinutes Int?
   questionCount   Int?

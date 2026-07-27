@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { workflowPayloadSchema } from '@/lib/schemas/workflows';
-import { applyWorkflow, contactWorkflow, interviewCompletedWorkflow, interviewReceivedWorkflow, oaCompletedWorkflow, oaReceivedWorkflow, offerWorkflow, rejectWorkflow } from '@/lib/workflows/applications';
+import { applyWorkflow, contactWorkflow, interviewCompletedWorkflow, interviewReceivedWorkflow, oaCompletedWorkflow, oaReceivedWorkflow, offerWorkflow, rejectWorkflow, setApplicationDateWorkflow } from '@/lib/workflows/applications';
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -102,6 +102,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       case 'contact':
         await contactWorkflow(prisma, id, parsed.data);
         updated = await prisma.application.findUniqueOrThrow({ where: { id } });
+        break;
+      case 'setApplicationDate':
+        updated = await setApplicationDateWorkflow(prisma, id, parsed.data);
         break;
       default:
         throw new Error('Unsupported action');

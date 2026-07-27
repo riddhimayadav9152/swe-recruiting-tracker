@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  deriveInitialStage,
   detectDuplicate,
   generateApplicationCode,
   generateNextAction,
   getDeadlineUrgency,
   getNextActionDueDate,
-  parseExcelDateValue,
+  parseExcelDateOnlyValue,
   validateApplicationInput,
 } from '../recruiting';
 
@@ -45,8 +46,22 @@ describe('recruiting helpers', () => {
     expect(getDeadlineUrgency(soon)).toBe('soon');
   });
 
-  it('parses Excel-like dates', () => {
-    expect(parseExcelDateValue('2026-07-26')).toBeInstanceOf(Date);
+  it('parses Excel-like dates into bare YYYY-MM-DD strings, never full timestamps', () => {
+    expect(parseExcelDateOnlyValue('2026-07-26')).toBe('2026-07-26');
+    expect(parseExcelDateOnlyValue('8/15/2026')).toBe('2026-08-15');
+    // An Excel serial date number (what xlsx returns for a date-formatted
+    // cell when cellDates isn't set) must round-trip to the same calendar
+    // day regardless of the server's own timezone.
+    expect(parseExcelDateOnlyValue(46249)).toBe('2026-08-15');
+    expect(parseExcelDateOnlyValue(new Date(Date.UTC(2026, 7, 15)))).toBe('2026-08-15');
+  });
+
+  it('rejects unrecognizable or impossible Excel date values instead of guessing', () => {
+    expect(parseExcelDateOnlyValue('not a date')).toBeNull();
+    expect(parseExcelDateOnlyValue('2026-02-31')).toBeNull();
+    expect(parseExcelDateOnlyValue('')).toBeNull();
+    expect(parseExcelDateOnlyValue(null)).toBeNull();
+    expect(parseExcelDateOnlyValue(undefined)).toBeNull();
   });
 
   it('validates required fields', () => {
@@ -59,5 +74,15 @@ describe('recruiting helpers', () => {
   it('creates a default next action due date', () => {
     const due = getNextActionDueDate('Applied', undefined, new Date(2026, 6, 20));
     expect(due.toDateString()).toBe('Thu Jul 30 2026');
+  });
+
+  it('derives a compatible current stage from status, never accepting an arbitrary one', () => {
+    expect(deriveInitialStage('Not Applied')).toBe('Discovered');
+    expect(deriveInitialStage('Preparing')).toBe('Preparing');
+    expect(deriveInitialStage('Applied')).toBe('Application Submitted');
+    expect(deriveInitialStage('OA')).toBe('Online Assessment');
+    expect(deriveInitialStage('Recruiter Screen')).toBe('Recruiter Screen');
+    expect(deriveInitialStage('Offer')).toBe('Offer Received');
+    expect(deriveInitialStage('Rejected')).toBe('Rejected');
   });
 });

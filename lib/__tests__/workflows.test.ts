@@ -15,6 +15,7 @@ import {
   oaReceivedWorkflow,
   offerWorkflow,
   rejectWorkflow,
+  setApplicationDateWorkflow,
 } from '../workflows/applications';
 
 const projectRoot = path.resolve(__dirname, '..', '..');
@@ -89,6 +90,7 @@ describe('workflow services', () => {
       action: 'oaReceived',
       receivedAt: '2026-07-26T09:00:00',
       dueAt: '2026-07-28T09:00:00',
+      timezone: 'America/New_York',
       platform: 'Coderbyte',
       durationMinutes: 90,
       questionCount: 4,
@@ -108,7 +110,7 @@ describe('workflow services', () => {
   it('persists oa completed details', async () => {
     const application = await createAppliedApplication();
 
-    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', receivedAt: '2026-07-26T09:00:00', dueAt: '2026-07-28T09:00:00' });
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', timezone: 'America/New_York', receivedAt: '2026-07-26T09:00:00', dueAt: '2026-07-28T09:00:00' });
     const received = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
     await oaCompletedWorkflow(prisma, application.id, {
       action: 'oaCompleted',
@@ -197,7 +199,7 @@ describe('workflow services', () => {
   it('persists oa completed details without dropping encountered questions', async () => {
     const application = await createAppliedApplication();
 
-    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', receivedAt: '2026-07-26T09:00:00', dueAt: '2026-07-28T09:00:00' });
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', timezone: 'America/New_York', receivedAt: '2026-07-26T09:00:00', dueAt: '2026-07-28T09:00:00' });
     const received = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
     await oaCompletedWorkflow(prisma, application.id, {
       action: 'oaCompleted',
@@ -267,7 +269,7 @@ describe('workflow services', () => {
   it('rejects completing an OA assessment that is already completed', async () => {
     const application = await createAppliedApplication();
 
-    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00' });
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', timezone: 'America/New_York', dueAt: '2026-07-28T09:00:00' });
     const assessment = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
 
     await oaCompletedWorkflow(prisma, application.id, {
@@ -318,7 +320,9 @@ describe('workflow services', () => {
   it('does not mutate application state when the workflow fails', async () => {
     const application = await createAppliedApplication();
 
-    await expect(interviewReceivedWorkflow(prisma, application.id, { action: 'interviewReceived', stage: 'Recruiter Screen' as never })).rejects.toThrow('scheduledStart is required');
+    await expect(
+      interviewReceivedWorkflow(prisma, application.id, { action: 'interviewReceived', stage: 'Recruiter Screen' } as Parameters<typeof interviewReceivedWorkflow>[2]),
+    ).rejects.toThrow('scheduledStart is required');
 
     const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
     expect(updated.status).toBe('Applied');
@@ -354,7 +358,7 @@ describe('workflow services', () => {
     await rejectWorkflow(prisma, application.id, { action: 'reject', rejectionReason: 'Position closed' });
 
     await expect(
-      oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00' }),
+      oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', timezone: 'America/New_York', dueAt: '2026-07-28T09:00:00' }),
     ).rejects.toThrow(/override/);
     await expect(
       interviewReceivedWorkflow(prisma, application.id, { action: 'interviewReceived', stage: 'Recruiter Screen', scheduledStart: '2026-07-28T09:00:00', timezone: 'America/New_York' }),
@@ -368,7 +372,7 @@ describe('workflow services', () => {
     const application = await createAppliedApplication();
     await rejectWorkflow(prisma, application.id, { action: 'reject', rejectionReason: 'Reconsidered' });
 
-    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00', override: true });
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', timezone: 'America/New_York', dueAt: '2026-07-28T09:00:00', override: true });
 
     const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
     expect(updated.status).toBe('OA');
@@ -397,7 +401,7 @@ describe('workflow services', () => {
     let updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
     expect(updated.status).toBe('Recruiter Screen');
 
-    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-28T09:00:00' });
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', timezone: 'America/New_York', dueAt: '2026-07-28T09:00:00' });
 
     updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
     expect(updated.status).toBe('OA');
@@ -410,8 +414,8 @@ describe('workflow services', () => {
   it('supports multiple OAs and multiple interview rounds for the same application', async () => {
     const application = await createAppliedApplication();
 
-    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-20T09:00:00' });
-    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', dueAt: '2026-07-27T09:00:00', platform: 'Second round' });
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', timezone: 'America/New_York', dueAt: '2026-07-20T09:00:00' });
+    await oaReceivedWorkflow(prisma, application.id, { action: 'oaReceived', timezone: 'America/New_York', dueAt: '2026-07-27T09:00:00', platform: 'Second round' });
 
     await interviewReceivedWorkflow(prisma, application.id, {
       action: 'interviewReceived',
@@ -453,5 +457,67 @@ describe('workflow services', () => {
     } finally {
       process.env.TZ = originalTz;
     }
+  });
+
+  it('creates an application with a status beyond Not Applied/Preparing and a derived, consistent stage — the standard endpoint restricts this further, but createApplicationRecord itself supports it for the import pathway', async () => {
+    const application = await createApplicationRecord(prisma, {
+      company: 'Imported Co',
+      role: 'Software Engineer',
+      applicationUrl: 'https://imported.example.com/apply',
+      priority: 'P1',
+      status: 'Applied',
+      applicationDeadline: '2026-08-15',
+    });
+
+    expect(application.status).toBe('Applied');
+    expect(application.currentStage).toBe('Application Submitted');
+    expect(application.dateApplied).toBeNull();
+    expect(application.applicationDeadline?.toISOString().slice(0, 10)).toBe('2026-08-15');
+    expect(application.nextActionDueKind).toBe('date');
+  });
+
+  it('repairs a missing application date and records the repair in activity history', async () => {
+    const application = await createApplicationRecord(prisma, {
+      company: 'Imported Co',
+      role: 'Software Engineer',
+      applicationUrl: 'https://imported.example.com/apply',
+      priority: 'P1',
+      status: 'Applied',
+    });
+    expect(application.dateApplied).toBeNull();
+
+    const updated = await setApplicationDateWorkflow(prisma, application.id, { action: 'setApplicationDate', dateApplied: '2026-07-20' });
+    expect(updated.dateApplied?.toISOString().slice(0, 10)).toBe('2026-07-20');
+
+    const activity = await prisma.activity.findFirstOrThrow({ where: { applicationId: application.id, eventType: 'Application date repaired' } });
+    expect(activity.summary).toContain('2026-07-20');
+  });
+
+  it('rejects repairing an application date that is already set', async () => {
+    const application = await createAppliedApplication();
+    await expect(
+      setApplicationDateWorkflow(prisma, application.id, { action: 'setApplicationDate', dateApplied: '2026-07-20' }),
+    ).rejects.toThrow('already has a date applied');
+  });
+
+  it.each([
+    { timezone: 'America/New_York', expectedUtc: '2026-08-15T13:00:00.000Z' }, // 9:00 AM EDT (UTC-4)
+    { timezone: 'America/Los_Angeles', expectedUtc: '2026-08-15T16:00:00.000Z' }, // 9:00 AM PDT (UTC-7)
+    { timezone: 'UTC', expectedUtc: '2026-08-15T09:00:00.000Z' },
+  ])('stores an OA due date entered in $timezone as the correct UTC instant', async ({ timezone, expectedUtc }) => {
+    const application = await createAppliedApplication();
+
+    await oaReceivedWorkflow(prisma, application.id, {
+      action: 'oaReceived',
+      dueAt: '2026-08-15T09:00:00',
+      timezone,
+    });
+
+    const assessment = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
+    expect(assessment.dueAt?.toISOString()).toBe(expectedUtc);
+    expect(assessment.timezone).toBe(timezone);
+
+    const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
+    expect(updated.nextActionDue?.toISOString()).toBe(expectedUtc);
   });
 });

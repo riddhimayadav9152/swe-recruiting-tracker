@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import * as XLSX from 'xlsx';
 
 const uniqueId = () => Math.random().toString(36).slice(2, 8);
 
@@ -285,9 +286,88 @@ test('backend rejects an invalid workflow transition even via a direct API call'
   // A freshly created application is "Not Applied" — OA Received is not a
   // valid transition from there, regardless of what the UI would allow.
   const response = await page.request.patch(`/api/applications/${created.id}`, {
-    data: { action: 'oaReceived', dueAt: '2026-08-01T09:00' },
+    data: { action: 'oaReceived', dueAt: '2026-08-01T09:00', timezone: 'America/New_York' },
   });
   expect(response.status()).toBe(400);
   const body = await response.json();
   expect(body.error).toMatch(/not a valid transition/);
+});
+
+test('renders two Technical Interview records for the same application distinctly, with no React key warning', async ({ page }) => {
+  const consoleWarnings: string[] = [];
+  page.on('console', (msg) => {
+    if (msg.type() === 'error' && /key/i.test(msg.text())) consoleWarnings.push(msg.text());
+  });
+
+  await page.goto('/');
+  await waitForTrackerLoaded(page);
+
+  const company = `Two Rounds Co ${uniqueId()}`;
+  await createOpportunity(page, company);
+  await markApplied(page, company);
+
+  await page.getByRole('button', { name: 'Interview Received' }).click();
+  await page.getByLabel('Interview stage').selectOption('Technical Interview');
+  await page.getByLabel('Scheduled start').fill('2026-08-10T10:00');
+  await page.getByLabel('Time zone').selectOption('America/New_York');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Workflow updated').last()).toBeVisible();
+
+  await page.getByRole('button', { name: 'Interview Received' }).click();
+  await page.getByLabel('Interview stage').selectOption('Technical Interview');
+  await page.getByLabel('Scheduled start').fill('2026-08-20T15:00');
+  await page.getByLabel('Time zone').selectOption('America/New_York');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Workflow updated').last()).toBeVisible();
+
+  await page.getByRole('button', { name: 'Interviews', exact: true }).click();
+  await waitForTrackerLoaded(page);
+
+  const rows = page.getByText(`${company} • Software Engineer`, { exact: true });
+  await expect(rows).toHaveCount(2);
+  await expect(page.getByText('Aug 10, 2026')).toBeVisible();
+  await expect(page.getByText('Aug 20, 2026')).toBeVisible();
+  expect(consoleWarnings).toEqual([]);
+});
+
+test('repairs an imported Applied record missing its application date', async ({ page }) => {
+  const company = `Imported Applied Co ${uniqueId()}`;
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.json_to_sheet([
+    { Company: company, Role: 'Software Engineer', URL: `https://example.com/apply/${uniqueId()}`, Priority: 'P1', Status: 'Applied' },
+  ]);
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Sheet1');
+  const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+  const importResponse = await page.request.post('/api/import', {
+    multipart: { file: { name: 'import.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer } },
+  });
+  expect(importResponse.ok()).toBe(true);
+  const importBody = await importResponse.json();
+  expect(importBody.imported).toBe(1);
+  expect(importBody.errors).toEqual([]);
+
+  await page.goto('/');
+  await waitForTrackerLoaded(page);
+  await openApplication(page, company);
+
+  // Imported directly as "Applied" with no dateApplied — Mark Applied is
+  // unavailable (the status is already past it), so the warning must offer
+  // a real way to fix the record instead of pointing at a hidden button.
+  await expect(page.getByRole('button', { name: 'Mark Applied' })).toHaveCount(0);
+  const warning = page.getByTestId('missing-date-applied-warning');
+  await expect(warning).toBeVisible();
+  await expect(warning).toContainText('Applied');
+
+  await warning.getByRole('button', { name: 'Set Application Date' }).click();
+  await page.getByLabel('Application date').fill('2026-07-15');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Workflow updated').last()).toBeVisible();
+
+  await expect(page.getByTestId('missing-date-applied-warning')).toHaveCount(0);
+  await expect(page.getByTestId('date-applied')).toHaveText('Jul 15, 2026');
+
+  await page.getByRole('button', { name: 'Activity', exact: true }).click();
+  await waitForTrackerLoaded(page);
+  await expect(page.getByText('Application date repaired')).toBeVisible();
 });
