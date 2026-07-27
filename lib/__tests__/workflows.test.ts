@@ -4,6 +4,7 @@ import path from 'path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { subDays } from 'date-fns';
+import { parseZonedDateTime } from '../dates';
 import {
   applyWorkflow,
   contactWorkflow,
@@ -167,13 +168,21 @@ describe('workflow services', () => {
 
   it('uses the scheduled interview time for the next-action deadline', async () => {
     const application = await createAppliedApplication();
-    const scheduledStart = new Date('2026-07-26T14:00:00');
+    // scheduledStart is a naive wall-clock string ("2026-07-26T14:00:00",
+    // exactly what an <input type="datetime-local"> sends) to be interpreted
+    // in the given timezone — NOT a pre-resolved ISO instant. Feeding it an
+    // already-UTC value (e.g. `someDate.toISOString()`) would double-convert
+    // it, since parseZonedDateTime treats the digits as wall-clock time in
+    // the target zone regardless of any "Z"/offset already present.
+    const timezone = 'America/New_York';
+    const scheduledStartLocal = '2026-07-26T14:00:00';
+    const expectedUtcStart = parseZonedDateTime(scheduledStartLocal, timezone)!;
 
     await interviewReceivedWorkflow(prisma, application.id, {
       action: 'interviewReceived',
       stage: 'Recruiter Screen',
-      scheduledStart: scheduledStart.toISOString(),
-      timezone: 'America/New_York',
+      scheduledStart: scheduledStartLocal,
+      timezone,
       format: 'Video',
       location: 'Zoom',
       recruiter: 'Mina',
@@ -182,7 +191,7 @@ describe('workflow services', () => {
     });
 
     const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
-    expect(updated.nextActionDue?.getTime()).toBe(subDays(scheduledStart, 1).getTime());
+    expect(updated.nextActionDue?.getTime()).toBe(subDays(expectedUtcStart, 1).getTime());
   });
 
   it('persists oa completed details without dropping encountered questions', async () => {

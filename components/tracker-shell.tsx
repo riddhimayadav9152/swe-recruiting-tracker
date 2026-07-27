@@ -395,17 +395,17 @@ export default function TrackerShell() {
       <div className="flex min-h-screen flex-col lg:flex-row">
         <aside className="w-full border-b border-violet-100 bg-white p-6 lg:w-72 lg:border-b-0 lg:border-r">
           <div className="mb-6">
-            <p className="text-xs uppercase tracking-[0.3em] text-violet-400">Local SWE Tracker</p>
-            <h1 className="mt-2 text-xl font-semibold text-slate-900">Riddhima&apos;s Recruiting Command Center</h1>
+            <p className="text-xs uppercase tracking-[0.3em] text-violet-400">Recruiting Workspace</p>
+            <h1 className="mt-2 text-xl font-semibold text-slate-900">Pipeline</h1>
           </div>
-          <button onClick={() => setShowNewModal(true)} className="mb-6 flex w-full items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-violet-700">
+          <button onClick={() => setShowNewModal(true)} className="mb-6 flex w-full items-center justify-center gap-2 rounded-lg bg-violet-700 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-violet-800">
             <PlusCircle size={18} /> New Opportunity
           </button>
           <nav className="space-y-1">
             {sections.map((section) => {
               const Icon = section.icon;
               return (
-                <button key={section.key} onClick={() => setActiveSection(section.key)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${activeSection === section.key ? 'bg-violet-600 text-white' : 'text-slate-600 hover:bg-violet-50 hover:text-violet-900'}`}>
+                <button key={section.key} onClick={() => setActiveSection(section.key)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${activeSection === section.key ? 'bg-violet-700 text-white' : 'text-slate-600 hover:bg-violet-50 hover:text-violet-900'}`}>
                   <Icon size={16} /> {section.label}
                 </button>
               );
@@ -633,7 +633,7 @@ export default function TrackerShell() {
                         <textarea id="jd-min-quals" value={quickForm.minimumQualifications ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, minimumQualifications: e.target.value }))} rows={4} className="w-full rounded-lg border border-violet-200 bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100" placeholder="Minimum qualifications" />
                         <label className="block text-sm font-medium text-violet-900/80" htmlFor="jd-preferred-quals">Preferred qualifications</label>
                         <textarea id="jd-preferred-quals" value={quickForm.preferredQualifications ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, preferredQualifications: e.target.value }))} rows={4} className="w-full rounded-lg border border-violet-200 bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100" placeholder="Preferred qualifications" />
-                        <button onClick={saveJobDescription} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-700">Save description</button>
+                        <button onClick={saveJobDescription} className="rounded-lg bg-violet-700 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-800">Save description</button>
                       </div>
                     ) : <div className="text-sm text-slate-500">Select an application</div>}
                   </div>
@@ -682,7 +682,7 @@ export default function TrackerShell() {
                 <div className="rounded-xl border border-violet-100 bg-white p-6 shadow-sm">
                   <h3 className="text-lg font-semibold">Resume versions</h3>
                   <div className="mt-4 space-y-3">
-                    <button onClick={() => { setResumeErrors({}); setShowResumeModal(true); }} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-700">Create Resume</button>
+                    <button onClick={() => { setResumeErrors({}); setShowResumeModal(true); }} className="rounded-lg bg-violet-700 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-800">Create Resume</button>
                     {resumes.map((resume) => (
                       <div key={resume.id} className="rounded-lg border border-violet-100 bg-white p-3 text-sm transition hover:border-violet-200 hover:bg-violet-50/50">
                         <div className="font-medium">{resume.name}</div>
@@ -714,7 +714,7 @@ export default function TrackerShell() {
                   <div className="rounded-xl border border-violet-100 bg-white p-6 shadow-sm">
                     <h3 className="text-lg font-semibold">Export</h3>
                     <div className="mt-4 space-y-3">
-                      <button onClick={exportWorkbook} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-700">Export Excel workbook</button>
+                      <button onClick={exportWorkbook} className="rounded-lg bg-violet-700 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-800">Export Excel workbook</button>
                       <button onClick={backupDatabase} className="rounded-lg border border-violet-200 bg-white px-4 py-2 text-sm text-slate-600 transition hover:border-violet-300 hover:bg-violet-50">Download SQLite backup</button>
                     </div>
                   </div>
@@ -759,7 +759,7 @@ export default function TrackerShell() {
                       <label className="block text-sm font-medium text-violet-900/80" htmlFor="profile-target-categories">Target categories</label>
                       <textarea id="profile-target-categories" className="w-full rounded-lg border border-violet-200 bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100" rows={3} value={profile.targetCategories} onChange={(e) => setProfile({ ...profile, targetCategories: e.target.value })} placeholder="Target categories" />
                     </div>
-                    <button className="md:col-span-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-700" type="submit">Save settings</button>
+                    <button className="md:col-span-2 rounded-lg bg-violet-700 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-800" type="submit">Save settings</button>
                   </form>
                 </div>
               )}
@@ -796,7 +796,7 @@ export default function TrackerShell() {
               <textarea id="notes" className="w-full rounded-lg border border-violet-200 bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100" placeholder="Notes" rows={3} value={newForm.notes} onChange={(e) => setNewForm({ ...newForm, notes: e.target.value })} />
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={() => setShowNewModal(false)} className="rounded-lg border border-violet-200 bg-white px-4 py-2 text-slate-600 transition hover:border-violet-300 hover:bg-violet-50">Cancel</button>
-                <button type="submit" className="rounded-lg bg-violet-600 px-4 py-2 text-white shadow-sm transition hover:bg-violet-700">Save</button>
+                <button type="submit" className="rounded-lg bg-violet-700 px-4 py-2 text-white shadow-sm transition hover:bg-violet-800">Save</button>
               </div>
             </form>
           </div>
@@ -1020,7 +1020,7 @@ export default function TrackerShell() {
               )}
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={() => setShowQuickModal(false)} className="rounded-lg border border-violet-200 bg-white px-4 py-2 text-slate-600 transition hover:border-violet-300 hover:bg-violet-50">Cancel</button>
-                <button type="submit" className="rounded-lg bg-violet-600 px-4 py-2 text-white shadow-sm transition hover:bg-violet-700">Save</button>
+                <button type="submit" className="rounded-lg bg-violet-700 px-4 py-2 text-white shadow-sm transition hover:bg-violet-800">Save</button>
               </div>
             </form>
           </div>
@@ -1053,7 +1053,7 @@ export default function TrackerShell() {
 
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={() => setShowResumeModal(false)} className="rounded-lg border border-violet-200 bg-white px-4 py-2 text-slate-600 transition hover:border-violet-300 hover:bg-violet-50">Cancel</button>
-                <button type="submit" className="rounded-lg bg-violet-600 px-4 py-2 text-white shadow-sm transition hover:bg-violet-700">Save resume</button>
+                <button type="submit" className="rounded-lg bg-violet-700 px-4 py-2 text-white shadow-sm transition hover:bg-violet-800">Save resume</button>
               </div>
             </form>
           </div>
