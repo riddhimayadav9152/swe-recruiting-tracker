@@ -2,7 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { addMinutes, subDays } from 'date-fns';
 import { deriveInitialStage, generateApplicationCode, generateNextAction } from '@/lib/recruiting';
 import { parseDateOnly, parseDateTimeLocal, parseZonedDateTime } from '@/lib/dates';
-import { assertActionAllowed } from '@/lib/workflow-policy';
+import { assertActionAllowed, hasSubmittedApplication } from '@/lib/workflow-policy';
 import type {
   ApplyPayload,
   ContactPayload,
@@ -465,13 +465,24 @@ export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: strin
 // "Mark Applied" workflow always sets dateApplied, defaulting to "now" if
 // the caller didn't supply one; see applyWorkflow above). This never changes
 // status/stage, so like contacts/notes it isn't gated by
-// lib/workflow-policy.ts — but it only ever fills in a genuinely missing
-// date, never overwrites one that's already set, to avoid quietly
-// corrupting a real (if unusual) application date.
+// lib/workflow-policy.ts's status transition matrix — but it only ever
+// fills in a genuinely missing date, never overwrites one that's already
+// set, AND it requires actual submission evidence first: without that
+// check, this would be a back door for silently turning an ordinary Not
+// Applied/Preparing record into an "Applied" one without ever going through
+// applyWorkflow (no resume version, no real submission). See
+// hasSubmittedApplication in lib/workflow-policy.ts for what counts as
+// evidence; `payload.confirmImportRepair` is the one narrow, explicit
+// exception (see lib/schemas/workflows.ts).
 export async function setApplicationDateWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: SetApplicationDatePayload) {
-  const existing = await prisma.application.findUnique({ where: { id: applicationId } });
+  const existing = await prisma.application.findUnique({ where: { id: applicationId }, include: { activities: true } });
   if (!existing) throw new Error('Application not found');
   if (existing.dateApplied) throw new Error('This application already has a date applied on record');
+
+  const hasEvidence = hasSubmittedApplication({ status: existing.status, dateApplied: existing.dateApplied, activities: existing.activities });
+  if (!hasEvidence && payload.confirmImportRepair !== true) {
+    throw new Error('Setting an application date requires submission evidence (a post-submission status or an "Application submitted" activity) — an ordinary Not Applied/Preparing record cannot be backdated this way');
+  }
 
   const dateApplied = parseDateOnly(payload.dateApplied);
   if (!dateApplied) throw new Error('A valid application date is required');

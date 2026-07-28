@@ -293,6 +293,31 @@ test('backend rejects an invalid workflow transition even via a direct API call'
   expect(body.error).toMatch(/not a valid transition/);
 });
 
+test('backend rejects Set Application Date on an ordinary Not Applied record without submission evidence', async ({ page }) => {
+  const company = `No Evidence Co ${uniqueId()}`;
+  const created = await page.request
+    .post('/api/applications', {
+      data: { company, role: 'Software Engineer', applicationUrl: `https://example.com/apply/${uniqueId()}`, priority: 'P1' },
+    })
+    .then((res) => res.json());
+
+  const rejected = await page.request.patch(`/api/applications/${created.id}`, {
+    data: { action: 'setApplicationDate', dateApplied: '2026-07-20' },
+  });
+  expect(rejected.status()).toBe(400);
+  const rejectedBody = await rejected.json();
+  expect(rejectedBody.error).toMatch(/submission evidence/);
+
+  // The explicit, narrow escape hatch still works for a caller that
+  // deliberately confirms it (e.g. a future import pathway).
+  const accepted = await page.request.patch(`/api/applications/${created.id}`, {
+    data: { action: 'setApplicationDate', dateApplied: '2026-07-20', confirmImportRepair: true },
+  });
+  expect(accepted.ok()).toBe(true);
+  const acceptedBody = await accepted.json();
+  expect(new Date(acceptedBody.dateApplied).toISOString().slice(0, 10)).toBe('2026-07-20');
+});
+
 test('renders two Technical Interview records for the same application distinctly, with no React key warning', async ({ page }) => {
   const consoleWarnings: string[] = [];
   page.on('console', (msg) => {
@@ -330,25 +355,74 @@ test('renders two Technical Interview records for the same application distinctl
   expect(consoleWarnings).toEqual([]);
 });
 
-test('repairs an imported Applied record missing its application date', async ({ page }) => {
-  const company = `Imported Applied Co ${uniqueId()}`;
+const uploadWorkbook = async (page: Page, rows: Array<Record<string, unknown>>) => {
   const workbook = XLSX.utils.book_new();
-  const sheet = XLSX.utils.json_to_sheet([
-    { Company: company, Role: 'Software Engineer', URL: `https://example.com/apply/${uniqueId()}`, Priority: 'P1', Status: 'Applied' },
-  ]);
+  const sheet = XLSX.utils.json_to_sheet(rows);
   XLSX.utils.book_append_sheet(workbook, sheet, 'Sheet1');
   const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+  await page.getByRole('button', { name: 'Import / Export' }).click();
+  await page.locator('#import-file').setInputFiles({ name: 'import.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer });
+};
 
-  const importResponse = await page.request.post('/api/import', {
-    multipart: { file: { name: 'import.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer } },
-  });
-  expect(importResponse.ok()).toBe(true);
-  const importBody = await importResponse.json();
-  expect(importBody.imported).toBe(1);
-  expect(importBody.errors).toEqual([]);
+test('import preview distinguishes valid, invalid, and blank rows before anything is written', async ({ page }) => {
+  await page.goto('/');
+  await waitForTrackerLoaded(page);
+
+  const company = `Preview Co ${uniqueId()}`;
+  await uploadWorkbook(page, [
+    { Company: company, Role: 'Software Engineer', URL: `https://example.com/apply/${uniqueId()}` },
+    { Company: '', Role: '', URL: '' },
+    { Company: 'Bad Row Co', Role: 'SWE', URL: 'not-a-url' },
+  ]);
+
+  await expect(page.getByText('3 rows')).toBeVisible();
+  await expect(page.getByText('1 valid')).toBeVisible();
+  await expect(page.getByText('1 invalid')).toBeVisible();
+  await expect(page.getByText('1 blank')).toBeVisible();
+  await expect(page.getByTestId('import-row-error')).toContainText('URL');
+
+  // Nothing has been written to the database yet — only the preview ran.
+  const beforeConfirm = await page.request.get('/api/applications').then((res) => res.json());
+  expect(beforeConfirm.find((app: { company: string }) => app.company === company)).toBeUndefined();
+
+  await page.getByRole('button', { name: 'Confirm Import' }).click();
+  await expect(page.getByText(/1 created/).first()).toBeVisible();
+
+  const afterConfirm = await page.request.get('/api/applications').then((res) => res.json());
+  expect(afterConfirm.find((app: { company: string }) => app.company === company)).toBeTruthy();
+  // The invalid/blank rows never got created.
+  expect(afterConfirm.filter((app: { company: string }) => app.company === 'Bad Row Co')).toHaveLength(0);
+});
+
+test('import preview flags a duplicate against an existing application and defaults it to Skip', async ({ page }) => {
+  await page.goto('/');
+  await waitForTrackerLoaded(page);
+
+  const company = `Existing Dup Co ${uniqueId()}`;
+  const applicationUrl = `https://example.com/apply/${uniqueId()}`;
+  await createOpportunity(page, company);
+
+  await uploadWorkbook(page, [{ Company: company, Role: 'Software Engineer', URL: applicationUrl }]);
+  await expect(page.getByText('1 match existing records')).toBeVisible();
+  await expect(page.getByText('Matches an existing application')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Confirm Import' }).click();
+  await expect(page.getByText(/1 skipped/).first()).toBeVisible();
+
+  const applications = await page.request.get('/api/applications').then((res) => res.json());
+  expect(applications.filter((app: { company: string }) => app.company === company)).toHaveLength(1);
+});
+
+test('repairs an imported Applied record missing its application date', async ({ page }) => {
+  const company = `Imported Applied Co ${uniqueId()}`;
 
   await page.goto('/');
   await waitForTrackerLoaded(page);
+  await uploadWorkbook(page, [{ Company: company, Role: 'Software Engineer', URL: `https://example.com/apply/${uniqueId()}`, Priority: 'P1', Status: 'Applied' }]);
+  await expect(page.getByText('1 valid')).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm Import' }).click();
+  await expect(page.getByText(/1 created/).first()).toBeVisible();
+
   await openApplication(page, company);
 
   // Imported directly as "Applied" with no dateApplied — Mark Applied is
@@ -369,5 +443,9 @@ test('repairs an imported Applied record missing its application date', async ({
 
   await page.getByRole('button', { name: 'Activity', exact: true }).click();
   await waitForTrackerLoaded(page);
-  await expect(page.getByText('Application date repaired')).toBeVisible();
+  // The Activity view is global across all applications, so scope the
+  // check to an entry that also mentions this test's own company — other
+  // tests running in the same shared e2e database may log the same event
+  // type for their own (differently-named) applications.
+  await expect(page.locator('div', { hasText: company }).filter({ hasText: 'Application date repaired' }).first()).toBeVisible();
 });

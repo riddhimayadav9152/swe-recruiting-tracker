@@ -168,6 +168,16 @@ const contactSchema = z.object({
 const setApplicationDateSchema = z.object({
   action: z.literal('setApplicationDate'),
   dateApplied: requiredDateOnlyString('dateApplied is required'),
+  // Normally, submission evidence (a post-submission status or an
+  // "Application submitted" activity entry — see hasSubmittedApplication in
+  // lib/workflow-policy.ts) is what justifies repairing a missing date. An
+  // ordinary Not Applied/Preparing record has neither and must be rejected.
+  // This flag is a narrow, explicit escape hatch for the one case that
+  // doesn't: a bulk import that intentionally created a pre-submission
+  // record needing a backdated application date with no activity trail yet.
+  // It must be set deliberately by that caller — the UI's own "Set
+  // Application Date" button never sends it.
+  confirmImportRepair: z.boolean().optional(),
 });
 
 const descriptionSchema = z.object({

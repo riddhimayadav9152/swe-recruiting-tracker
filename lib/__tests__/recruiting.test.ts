@@ -6,7 +6,6 @@ import {
   generateNextAction,
   getDeadlineUrgency,
   getNextActionDueDate,
-  parseExcelDateOnlyValue,
   validateApplicationInput,
 } from '../recruiting';
 
@@ -46,22 +45,18 @@ describe('recruiting helpers', () => {
     expect(getDeadlineUrgency(soon)).toBe('soon');
   });
 
-  it('parses Excel-like dates into bare YYYY-MM-DD strings, never full timestamps', () => {
-    expect(parseExcelDateOnlyValue('2026-07-26')).toBe('2026-07-26');
-    expect(parseExcelDateOnlyValue('8/15/2026')).toBe('2026-08-15');
-    // An Excel serial date number (what xlsx returns for a date-formatted
-    // cell when cellDates isn't set) must round-trip to the same calendar
-    // day regardless of the server's own timezone.
-    expect(parseExcelDateOnlyValue(46249)).toBe('2026-08-15');
-    expect(parseExcelDateOnlyValue(new Date(Date.UTC(2026, 7, 15)))).toBe('2026-08-15');
-  });
-
-  it('rejects unrecognizable or impossible Excel date values instead of guessing', () => {
-    expect(parseExcelDateOnlyValue('not a date')).toBeNull();
-    expect(parseExcelDateOnlyValue('2026-02-31')).toBeNull();
-    expect(parseExcelDateOnlyValue('')).toBeNull();
-    expect(parseExcelDateOnlyValue(null)).toBeNull();
-    expect(parseExcelDateOnlyValue(undefined)).toBeNull();
+  it('resolves a date-kind deadline to its end-of-day instant (not its raw UTC-midnight value) for "soon" classification', () => {
+    // The "soon" cutoff is now + 3 days = 2026-08-16T02:00:00Z, which falls
+    // BETWEEN the deadline's two possible end-of-day instants: end-of-day
+    // UTC (2026-08-16T00:00Z) is before it, but end-of-day America/New_York
+    // (2026-08-16T04:00Z, since midnight EDT is 4 hours after UTC midnight)
+    // is after it — so the same stored value is "soon" for a UTC user but
+    // merely "normal" for a New York user, depending entirely on which
+    // timezone's calendar day it's actually due at the end of.
+    const now = new Date('2026-08-13T02:00:00.000Z');
+    const deadline = new Date('2026-08-15T00:00:00.000Z');
+    expect(getDeadlineUrgency(deadline, 'date', 'UTC', now)).toBe('soon');
+    expect(getDeadlineUrgency(deadline, 'date', 'America/New_York', now)).toBe('normal');
   });
 
   it('validates required fields', () => {

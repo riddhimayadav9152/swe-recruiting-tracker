@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { format, formatDistanceToNow } from 'date-fns';
-import { formatByKind, formatDateOnly, formatInZone, formatTimestamp, isDeadlineOverdue, type DeadlineKind } from '@/lib/dates';
+import { formatByKind, formatDateOnly, formatInZone, formatTimestamp, isDeadlineOverdue, resolveDeadlineInstant, type DeadlineKind } from '@/lib/dates';
 import { getActionVisibility, isMissingApplicationDate, type TransitionAction } from '@/lib/workflow-policy';
 import { Activity, BriefcaseBusiness, CalendarDays, Download, FileText, FolderOpen, LayoutGrid, PlusCircle, Search, Settings, Users, FileStack, MessageSquareText } from 'lucide-react';
 import { toast } from 'react-hot-toast';
@@ -31,7 +31,7 @@ type ApplicationRecord = {
   jobDescription: { fullText: string | null } | null;
   resumeVersion: { id: string; name: string } | null;
   interviews: Array<{ id: string; stage: string; scheduledStart: string | null; timezone: string | null; completedAt: string | null; notes: string | null }>;
-  assessments: Array<{ id: string; type: string; dueAt: string | null; timezone: string | null; completedAt: string | null; result: string | null }>;
+  assessments: Array<{ id: string; type: string; dueAt: string | null; timezone: string | null; platform: string | null; durationMinutes: number | null; questionCount: number | null; topics: string | null; completedAt: string | null; result: string | null }>;
   contacts: Array<{ name: string; email: string | null; notes: string | null }>;
   activities: Array<{ eventType: string; summary: string; createdAt: string }>;
   offers: { offerDate: string | null; decisionDeadline: string | null; compensationSummary: string | null; notes: string | null } | null;
@@ -40,6 +40,49 @@ type ApplicationRecord = {
 type ResumeRecord = { id:string; name:string; targetType:string; fileName:string | null; description:string | null; applications: Array<{ id:string }> };
 
 type ProfileRecord = { id:string; name:string; school:string; major:string; graduation:string; preferredLocation:string; currentExperience:string; targetRoles:string; targetCategories:string };
+
+// --- Import wizard client-side types ----------------------------------------
+// Deliberately NOT imported from lib/import.ts — that module pulls in
+// '@prisma/client' and 'xlsx', which have no place in a client bundle. These
+// mirror its shapes just closely enough for this component to render them;
+// the server is always the source of truth for validation.
+const IMPORT_TARGET_FIELDS = [
+  'company', 'role', 'applicationUrl', 'priority', 'status', 'location',
+  'applicationDeadline', 'dateFound', 'notes', 'dateApplied', 'resumeVersionName',
+  'assessmentDueAt', 'assessmentTimezone', 'assessmentPlatform',
+  'interviewScheduledStart', 'interviewTimezone',
+  'offerDecisionDeadline', 'offerCompensationSummary', 'outcome',
+  'nextAction', 'nextActionDue',
+] as const;
+type ImportTargetField = (typeof IMPORT_TARGET_FIELDS)[number];
+const IMPORT_FIELD_LABELS: Record<ImportTargetField, string> = {
+  company: 'Company', role: 'Role', applicationUrl: 'Application URL', priority: 'Priority', status: 'Status',
+  location: 'Location', applicationDeadline: 'Application Deadline', dateFound: 'Date Found', notes: 'Notes',
+  dateApplied: 'Date Applied', resumeVersionName: 'Resume Version (by name)',
+  assessmentDueAt: 'OA Due At', assessmentTimezone: 'OA Timezone', assessmentPlatform: 'OA Platform',
+  interviewScheduledStart: 'Interview Scheduled Start', interviewTimezone: 'Interview Timezone',
+  offerDecisionDeadline: 'Decision Deadline', offerCompensationSummary: 'Compensation',
+  outcome: 'Outcome / Rejection Reason', nextAction: 'Next Action (override)', nextActionDue: 'Next Action Due (override)',
+};
+type ImportColumnMap = Record<ImportTargetField, string | null>;
+type ImportRowDecision = 'create' | 'update' | 'skip' | 'importAnyway';
+type ImportDuplicateInfo = { source: 'database' | 'workbook'; applicationId?: string; rowNumber?: number; matchedOn: string } | null;
+type ImportPreviewRow = {
+  rowNumber: number;
+  status: 'valid' | 'invalid' | 'blank';
+  data: Record<string, unknown> | null;
+  errors: string[];
+  duplicate: ImportDuplicateInfo;
+  suggestedAction: ImportRowDecision | 'error' | 'blank';
+};
+type ImportPreviewResponse = {
+  sheetNames: string[];
+  sheetName: string;
+  headers: string[];
+  columnMap: ImportColumnMap;
+  rows: ImportPreviewRow[];
+  summary: { total: number; valid: number; invalid: number; blank: number; duplicatesDatabase: number; duplicatesWorkbook: number };
+};
 
 type QuickAction = 'apply' | 'oaReceived' | 'oaCompleted' | 'interviewReceived' | 'interviewCompleted' | 'reject' | 'offer' | 'note' | 'contact' | 'setApplicationDate';
 
@@ -140,7 +183,11 @@ export default function TrackerShell() {
   const [quickForm, setQuickForm] = useState<Record<string, string>>({});
   const [quickErrors, setQuickErrors] = useState<Record<string, string[] | undefined>>({});
   const [pendingOverride, setPendingOverride] = useState(false);
-  const [importErrors, setImportErrors] = useState<Array<{ row: number; company: string; errors: string[] }>>([]);
+  const [importFileHandle, setImportFileHandle] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportPreviewResponse | null>(null);
+  const [importRowActions, setImportRowActions] = useState<Record<number, ImportRowDecision>>({});
+  const [importLoading, setImportLoading] = useState(false);
+  const [importResult, setImportResult] = useState<{ created: number; updated: number; skipped: number; errors: Array<{ rowNumber: number; errors: string[] }> } | null>(null);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -197,6 +244,8 @@ export default function TrackerShell() {
     };
   }, [applications]);
 
+  const deadlineTimeZone = browserTimeZone();
+
   const deadlines = useMemo(() => applications
     .filter((app) => app.nextActionDue || app.applicationDeadline)
     .map((app) => ({
@@ -211,8 +260,13 @@ export default function TrackerShell() {
       company: app.company,
       role: app.role,
     }))
-    .sort((a, b) => (a.dueDate && b.dueDate ? new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime() : 0))
-    .slice(0, 8), [applications]);
+    .sort((a, b) => {
+      const aInstant = resolveDeadlineInstant(a.dueDate, a.dueDateKind, deadlineTimeZone);
+      const bInstant = resolveDeadlineInstant(b.dueDate, b.dueDateKind, deadlineTimeZone);
+      if (!aInstant || !bInstant) return 0;
+      return aInstant.getTime() - bInstant.getTime();
+    })
+    .slice(0, 8), [applications, deadlineTimeZone]);
 
   const createApp = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -335,26 +389,85 @@ export default function TrackerShell() {
     toast.success('Excel export downloaded');
   };
 
-  const importFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const fetchImportPreview = async (file: File, sheetName?: string, columnMapOverrides?: Partial<ImportColumnMap>) => {
+    setImportLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      if (sheetName) formData.append('sheetName', sheetName);
+      if (columnMapOverrides) formData.append('columnMapOverrides', JSON.stringify(columnMapOverrides));
+      const response = await fetch('/api/import/preview', { method: 'POST', body: formData });
+      const data = await response.json();
+      if (!response.ok) {
+        toast.error(data.error ?? 'Unable to preview this workbook');
+        return;
+      }
+      setImportPreview(data);
+      const initialActions: Record<number, ImportRowDecision> = {};
+      for (const row of data.rows as ImportPreviewRow[]) {
+        if (row.status === 'valid') initialActions[row.rowNumber] = (row.suggestedAction as ImportRowDecision) ?? 'create';
+      }
+      setImportRowActions(initialActions);
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const handleImportFileSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    setImportErrors([]);
-    const formData = new FormData();
-    formData.append('file', file);
-    const response = await fetch('/api/import', { method: 'POST', body: formData });
-    const data = await response.json();
-    if (response.ok) {
-      setImportErrors(data.errors ?? []);
-      if (data.errors?.length) {
-        toast.error(`Imported ${data.imported} rows, ${data.errors.length} row(s) failed — see the report below`);
-      } else {
-        toast.success(`Imported ${data.imported} rows`);
-      }
-      loadData();
-    } else {
-      toast.error('Import failed');
-    }
+    setImportResult(null);
+    setImportFileHandle(file);
+    await fetchImportPreview(file);
     event.target.value = '';
+  };
+
+  const handleImportSheetChange = async (sheetName: string) => {
+    if (!importFileHandle) return;
+    await fetchImportPreview(importFileHandle, sheetName);
+  };
+
+  const handleImportColumnMapChange = async (field: ImportTargetField, header: string) => {
+    if (!importFileHandle || !importPreview) return;
+    await fetchImportPreview(importFileHandle, importPreview.sheetName, { ...importPreview.columnMap, [field]: header || null });
+  };
+
+  const resetImportWizard = () => {
+    setImportFileHandle(null);
+    setImportPreview(null);
+    setImportRowActions({});
+  };
+
+  const confirmImport = async () => {
+    if (!importPreview) return;
+    setImportLoading(true);
+    try {
+      const rows = importPreview.rows
+        .filter((row) => row.status === 'valid')
+        .map((row) => ({
+          rowNumber: row.rowNumber,
+          action: importRowActions[row.rowNumber] ?? 'create',
+          data: row.data,
+          matchedApplicationId: row.duplicate?.source === 'database' ? row.duplicate.applicationId ?? null : null,
+        }));
+
+      const response = await fetch('/api/import/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        toast.error(data.error ?? 'Import failed');
+        return;
+      }
+      setImportResult(data);
+      toast.success(`Imported: ${data.created} created, ${data.updated} updated, ${data.skipped} skipped${data.errors.length ? `, ${data.errors.length} failed` : ''}`);
+      resetImportWizard();
+      await loadData();
+    } finally {
+      setImportLoading(false);
+    }
   };
 
   const backupDatabase = async () => {
@@ -576,6 +689,25 @@ export default function TrackerShell() {
                               <p>Notes: <span data-testid="offer-notes" className="font-medium text-slate-900">{selectedApp.offers.notes ?? '—'}</span></p>
                             </div>
                           )}
+                          {selectedApp.assessments.map((assessment) => (
+                            <div key={assessment.id} data-testid="assessment-detail" className="rounded-lg border border-sky-100 bg-sky-50 p-3">
+                              <p className="font-medium text-sky-900">{assessment.type} assessment</p>
+                              {assessment.dueAt && (
+                                <p>Due: <span className="font-medium text-slate-900">
+                                  {formatInZone(assessment.dueAt, assessment.timezone, 'MMM d, yyyy h:mm a zzz')}
+                                  {assessment.timezone && assessment.timezone !== browserTimeZone() && (
+                                    <> ({formatTimestamp(assessment.dueAt, 'MMM d, h:mm a')} your time)</>
+                                  )}
+                                </span></p>
+                              )}
+                              <p>Platform: <span className="font-medium text-slate-900">{assessment.platform ?? '—'}</span></p>
+                              <p>Duration: <span className="font-medium text-slate-900">{assessment.durationMinutes ? `${assessment.durationMinutes} min` : '—'}</span></p>
+                              <p>Questions: <span className="font-medium text-slate-900">{assessment.questionCount ?? '—'}</span></p>
+                              <p>Topics: <span className="font-medium text-slate-900">{assessment.topics ?? '—'}</span></p>
+                              <p>Status: <span className="font-medium text-slate-900">{assessment.completedAt ? `Completed ${formatTimestamp(assessment.completedAt, 'MMM d, yyyy')}` : 'In progress'}</span></p>
+                              {assessment.completedAt && <p>Result: <span className="font-medium text-slate-900">{assessment.result ?? '—'}</span></p>}
+                            </div>
+                          ))}
                         </div>
                         <div className="mt-4 flex flex-wrap gap-2">
                           {renderWorkflowButton(selectedApp, 'apply', 'Mark Applied', { resumeVersionId: selectedApp.resumeVersion?.id ?? '' })}
@@ -732,34 +864,157 @@ export default function TrackerShell() {
               )}
 
               {activeSection === 'import-export' && (
-                <div className="grid gap-6 xl:grid-cols-2">
-                  <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
-                    <h3 className="text-lg font-semibold">Export</h3>
-                    <div className="mt-4 space-y-3">
-                      <button onClick={exportWorkbook} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f]">Export Excel workbook</button>
-                      <button onClick={backupDatabase} className="rounded-lg border border-[#ffc4d6] bg-white px-4 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1]">Download SQLite backup</button>
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
-                    <h3 className="text-lg font-semibold">Import</h3>
-                    <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                      <p className="font-semibold">⚠ Experimental — back up your database first</p>
-                      <p className="mt-1">Download a SQLite backup above before importing. This importer is still being hardened and is not yet recommended for your canonical tracker data — review the row report below carefully after every import.</p>
-                    </div>
-                    <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="import-file">Tracker workbook file</label>
-                    <input id="import-file" type="file" accept=".xlsx,.xls" onChange={importFile} className="mt-2 block w-full text-sm" />
-                    <p className="mt-3 text-sm text-slate-500">Upload an existing tracker workbook to import applications.</p>
-                    {importErrors.length > 0 && (
-                      <div className="mt-4 space-y-2">
-                        <p className="text-sm font-medium text-rose-700">{importErrors.length} row(s) could not be imported:</p>
-                        {importErrors.map((rowError) => (
-                          <div key={rowError.row} data-testid="import-row-error" className="rounded-lg border border-rose-100 bg-rose-50 p-2 text-xs text-rose-700">
-                            Row {rowError.row} ({rowError.company}): {rowError.errors.join('; ')}
-                          </div>
-                        ))}
+                <div className="space-y-6">
+                  <div className="grid gap-6 xl:grid-cols-2">
+                    <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
+                      <h3 className="text-lg font-semibold">Export</h3>
+                      <div className="mt-4 space-y-3">
+                        <button onClick={exportWorkbook} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f]">Export Excel workbook</button>
+                        <button onClick={backupDatabase} className="rounded-lg border border-[#ffc4d6] bg-white px-4 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1]">Download SQLite backup</button>
                       </div>
-                    )}
+                    </div>
+                    <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
+                      <h3 className="text-lg font-semibold">Import</h3>
+                      <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                        <p className="font-semibold">⚠ Experimental — back up your database first</p>
+                        <p className="mt-1">Download a SQLite backup above before importing. Review the preview carefully — nothing is written until you confirm.</p>
+                      </div>
+                      <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="import-file">Tracker workbook file</label>
+                      <input id="import-file" type="file" accept=".xlsx,.xls" onChange={handleImportFileSelected} className="mt-2 block w-full text-sm" />
+                      <p className="mt-3 text-sm text-slate-500">Upload a workbook to preview and map its rows before anything is imported.</p>
+                    </div>
                   </div>
+
+                  {importLoading && !importPreview && <div className="rounded-xl border border-[#ffcad4] bg-white p-6 text-sm text-slate-500 shadow-sm">Reading workbook…</div>}
+
+                  {importPreview && (
+                    <div className="space-y-4 rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <h3 className="text-lg font-semibold">Preview — {importPreview.sheetName}</h3>
+                        {importPreview.sheetNames.length > 1 && (
+                          <label className="flex items-center gap-2 text-sm text-slate-600">
+                            Sheet
+                            <select
+                              value={importPreview.sheetName}
+                              onChange={(e) => handleImportSheetChange(e.target.value)}
+                              className="rounded-lg border border-[#ffc4d6] bg-white p-2 text-sm outline-none focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]"
+                            >
+                              {importPreview.sheetNames.map((name) => <option key={name} value={name}>{name}</option>)}
+                            </select>
+                          </label>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap gap-3 text-sm">
+                        <span className="rounded-full bg-slate-100 px-3 py-1">{importPreview.summary.total} rows</span>
+                        <span className="rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">{importPreview.summary.valid} valid</span>
+                        <span className="rounded-full bg-rose-50 px-3 py-1 text-rose-700">{importPreview.summary.invalid} invalid</span>
+                        <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-500">{importPreview.summary.blank} blank</span>
+                        <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">{importPreview.summary.duplicatesDatabase} match existing records</span>
+                        <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">{importPreview.summary.duplicatesWorkbook} duplicate within workbook</span>
+                      </div>
+
+                      <details className="rounded-lg border border-[#ffcad4] p-3">
+                        <summary className="cursor-pointer text-sm font-medium text-slate-700">Column mapping</summary>
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          {IMPORT_TARGET_FIELDS.map((field) => (
+                            <label key={field} className="text-xs text-slate-600">
+                              {IMPORT_FIELD_LABELS[field]}
+                              <select
+                                value={importPreview.columnMap[field] ?? ''}
+                                onChange={(e) => handleImportColumnMapChange(field, e.target.value)}
+                                className="mt-1 block w-full rounded-lg border border-[#ffc4d6] bg-white p-2 text-sm outline-none focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]"
+                              >
+                                <option value="">Not mapped</option>
+                                {importPreview.headers.map((header) => <option key={header} value={header}>{header}</option>)}
+                              </select>
+                            </label>
+                          ))}
+                        </div>
+                      </details>
+
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-[#ffcad4] text-left text-[#ffa6c1]">
+                              <th className="px-2 py-2">Row</th>
+                              <th className="px-2 py-2">Company</th>
+                              <th className="px-2 py-2">Role</th>
+                              <th className="px-2 py-2">Status</th>
+                              <th className="px-2 py-2">Issue / duplicate</th>
+                              <th className="px-2 py-2">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {importPreview.rows.filter((row) => row.status !== 'blank').map((row) => (
+                              <tr key={row.rowNumber} data-testid="import-preview-row" className="border-b border-[#fadde1]">
+                                <td className="px-2 py-2 text-slate-500">{row.rowNumber}</td>
+                                <td className="px-2 py-2">{typeof row.data?.company === 'string' ? row.data.company : '—'}</td>
+                                <td className="px-2 py-2">{typeof row.data?.role === 'string' ? row.data.role : '—'}</td>
+                                <td className="px-2 py-2">{typeof row.data?.status === 'string' ? row.data.status : '—'}</td>
+                                <td className="px-2 py-2 text-xs">
+                                  {row.status === 'invalid' && <span data-testid="import-row-error" className="text-rose-600">{row.errors.join('; ')}</span>}
+                                  {row.duplicate?.source === 'database' && <span className="text-amber-700">Matches an existing application</span>}
+                                  {row.duplicate?.source === 'workbook' && <span className="text-amber-700">Duplicates row {row.duplicate.rowNumber} in this sheet</span>}
+                                </td>
+                                <td className="px-2 py-2">
+                                  {row.status === 'valid' ? (
+                                    <select
+                                      value={importRowActions[row.rowNumber] ?? 'create'}
+                                      onChange={(e) => setImportRowActions((prev) => ({ ...prev, [row.rowNumber]: e.target.value as ImportRowDecision }))}
+                                      className="rounded-lg border border-[#ffc4d6] bg-white p-1.5 text-sm outline-none focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]"
+                                    >
+                                      {row.duplicate ? (
+                                        <>
+                                          <option value="skip">Skip</option>
+                                          {row.duplicate.source === 'database' && <option value="update">Update existing</option>}
+                                          <option value="importAnyway">Import anyway</option>
+                                        </>
+                                      ) : (
+                                        <option value="create">Create</option>
+                                      )}
+                                    </select>
+                                  ) : (
+                                    <span className="text-xs text-slate-400">Cannot import</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div className="flex justify-end gap-2">
+                        <button onClick={resetImportWizard} className="rounded-lg border border-[#ffc4d6] bg-white px-4 py-2 text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1]">Cancel</button>
+                        <button
+                          onClick={confirmImport}
+                          disabled={importLoading || importPreview.summary.valid === 0}
+                          className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f] disabled:opacity-50"
+                        >
+                          Confirm Import
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {importResult && (
+                    <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
+                      <h3 className="text-lg font-semibold">Import result</h3>
+                      <p className="mt-2 text-sm text-slate-600">
+                        {importResult.created} created • {importResult.updated} updated • {importResult.skipped} skipped
+                        {importResult.errors.length > 0 && ` • ${importResult.errors.length} failed`}
+                      </p>
+                      {importResult.errors.length > 0 && (
+                        <div className="mt-3 space-y-2">
+                          {importResult.errors.map((rowError) => (
+                            <div key={rowError.rowNumber} data-testid="import-row-error" className="rounded-lg border border-rose-100 bg-rose-50 p-2 text-xs text-rose-700">
+                              Row {rowError.rowNumber}: {rowError.errors.join('; ')}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 

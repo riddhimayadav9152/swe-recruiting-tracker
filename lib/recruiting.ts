@@ -1,5 +1,5 @@
 import { format, subDays } from 'date-fns';
-import { isDateOnlyString, isDeadlineOverdue, type DeadlineKind } from '@/lib/dates';
+import { isDeadlineOverdue, resolveDeadlineInstant, type DeadlineKind } from '@/lib/dates';
 
 export const statuses = [
   'Not Applied',
@@ -99,50 +99,6 @@ export const validateApplicationInput = (payload: ApplicationInput) => {
   return errors;
 };
 
-const pad2 = (value: number): string => String(value).padStart(2, '0');
-
-const buildDateOnlyString = (year: number, month: number, day: number): string | null => {
-  const candidate = `${year}-${pad2(month)}-${pad2(day)}`;
-  return isDateOnlyString(candidate) ? candidate : null;
-};
-
-/**
- * Normalizes an Excel/spreadsheet cell value into a bare "YYYY-MM-DD"
- * date-only string (or `null` if it isn't a recognizable date) — never a
- * full ISO timestamp. Application Deadline / Date Found columns are
- * calendar dates with no time component, so this must feed directly into
- * `parseDateOnly` (which only accepts that exact shape); converting through
- * a full `Date`/ISO-timestamp round-trip first (as the importer used to)
- * silently fails `parseDateOnly`'s validation and drops the value entirely.
- *
- * Excel serial numbers and JS `Date` objects (what `xlsx` hands back for a
- * date-formatted cell) are read via their UTC calendar fields, since the
- * serial-to-Date conversion below anchors at UTC midnight — reading local
- * fields back out could shift the day depending on the server's timezone.
- */
-export const parseExcelDateOnlyValue = (value: unknown): string | null => {
-  if (value === null || value === undefined || value === '') return null;
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) return null;
-    return buildDateOnlyString(value.getUTCFullYear(), value.getUTCMonth() + 1, value.getUTCDate());
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return null;
-    const asDate = new Date(Date.UTC(1899, 11, 30) + Math.round(value) * 86400000);
-    return buildDateOnlyString(asDate.getUTCFullYear(), asDate.getUTCMonth() + 1, asDate.getUTCDate());
-  }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/.exec(trimmed);
-    if (iso) return buildDateOnlyString(Number(iso[1]), Number(iso[2]), Number(iso[3]));
-    const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(trimmed);
-    if (slash) return buildDateOnlyString(Number(slash[3]), Number(slash[1]), Number(slash[2]));
-    return null;
-  }
-  return null;
-};
-
 export type DeadlineUrgency = 'none' | 'overdue' | 'soon' | 'normal';
 
 export const getDeadlineUrgency = (
@@ -153,7 +109,8 @@ export const getDeadlineUrgency = (
 ): DeadlineUrgency => {
   if (!date) return 'none';
   if (isDeadlineOverdue(date, kind, userTimeZone, now)) return 'overdue';
-  if (date.getTime() <= subDays(now, -3).getTime()) return 'soon';
+  const instant = resolveDeadlineInstant(date, kind, userTimeZone);
+  if (instant && instant.getTime() <= subDays(now, -3).getTime()) return 'soon';
   return 'normal';
 };
 

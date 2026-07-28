@@ -10,6 +10,7 @@
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "seed": "node prisma/seed.mjs",
+    "backfill:next-action-due-kind": "tsx scripts/backfill-next-action-due-kind.mjs",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },

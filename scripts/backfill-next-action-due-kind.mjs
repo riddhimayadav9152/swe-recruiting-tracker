@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 // One-time backfill for the `nextActionDueKind` column on Application.
+// Run via `npm run backfill:next-action-due-kind` (uses `tsx`, since this
+// file imports the TypeScript lib/backfill.ts directly — running it with
+// plain `node` will fail to resolve that import).
 // See docs/db-upgrades/next-action-due-kind.md for the full runbook
-// (what this does, why, and how to roll it back).
+// (what this does, why, and how to roll it back). The actual backfill logic
+// lives in lib/backfill.ts (imported below) so it can be unit tested
+// directly against the test database — this script is just the CLI
+// wrapper: resolve the DB, back it up, run the backfill, report results.
 import { existsSync, readFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { PrismaClient } from '@prisma/client';
+import { backfillNextActionDueKind } from '../lib/backfill.ts';
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const schemaDir = path.join(repoRoot, 'prisma');
@@ -20,6 +27,11 @@ const resolveDatabaseUrl = () => {
   throw new Error('DATABASE_URL is not set and no .env file was found. Set DATABASE_URL and re-run.');
 };
 
+// Relative SQLite `file:` URLs in this project resolve from prisma/schema.prisma's
+// own directory (`prisma/`), not the repo root or the caller's cwd — e.g.
+// `file:../data/dev.db` resolves to `<repoRoot>/data/dev.db`. Mirror that
+// same resolution here (see lib/prisma.ts) so this script always operates on
+// the exact database file the app and the Prisma CLI use.
 const toAbsoluteDbPath = (databaseUrl) => {
   const filePart = databaseUrl.replace(/^file:/, '');
   return path.isAbsolute(filePart) ? filePart : path.resolve(schemaDir, filePart);
@@ -44,10 +56,10 @@ console.log(`Backed up ${dbPath}\n     -> ${backupPath}`);
 const prisma = new PrismaClient({ datasources: { db: { url: `file:${dbPath}` } } });
 
 async function main() {
-  // Step 2: the column itself is added by `npx prisma db push` picking up
-  // `nextActionDueKind` from prisma/schema.prisma (with its safe default of
-  // 'timestamp') — this script only handles the backfill, which `db push`
-  // has no way to know how to do.
+  // Step 2: the column itself (and the nullable Assessment.timezone column)
+  // is added by `npx prisma db push` picking up prisma/schema.prisma (with
+  // nextActionDueKind's safe default of 'timestamp') — this script only
+  // handles the backfill, which `db push` has no way to know how to do.
   const columns = await prisma.$queryRawUnsafe('PRAGMA table_info(Application);');
   if (!columns.some((col) => col.name === 'nextActionDueKind')) {
     console.error("nextActionDueKind column does not exist yet. Run `npx prisma db push` first, then re-run this script.");
@@ -55,28 +67,12 @@ async function main() {
     return;
   }
 
-  // Step 3: backfill. The only workflow that ever populates nextActionDue
-  // from a date-only source is offerWorkflow, which copies it straight from
-  // the offer's own decisionDeadline (see lib/workflows/applications.ts) —
-  // every other workflow sets a real timestamp. So an application is only
-  // reclassified as 'date' when its current nextActionDue still matches its
-  // offer's decisionDeadline exactly; everything else keeps the safe
-  // 'timestamp' default untouched.
-  const candidates = await prisma.application.findMany({
-    where: { status: 'Offer', nextActionDue: { not: null } },
-    include: { offers: true },
-  });
+  const result = await backfillNextActionDueKind(prisma);
 
-  let updated = 0;
-  for (const application of candidates) {
-    if (application.nextActionDueKind === 'date') continue;
-    if (!application.offers?.decisionDeadline) continue;
-    if (application.offers.decisionDeadline.getTime() !== application.nextActionDue?.getTime()) continue;
-    await prisma.application.update({ where: { id: application.id }, data: { nextActionDueKind: 'date' } });
-    updated += 1;
-  }
-
-  console.log(`Backfilled ${updated} application(s) to nextActionDueKind = 'date'.`);
+  console.log(`Backfilled ${result.updated} application(s) to nextActionDueKind = 'date':`);
+  console.log(`  - matching Application Deadline:      ${result.byCategory.applicationDeadline}`);
+  console.log(`  - matching Offer decision deadline:    ${result.byCategory.offerDecisionDeadline}`);
+  console.log(`  - matching Interview follow-up date:   ${result.byCategory.interviewFollowUpDate}`);
   console.log("All other applications keep the existing/default nextActionDueKind = 'timestamp'.");
   console.log(`\nIf anything here looks wrong, restore the backup:\n  cp "${backupPath}" "${dbPath}"`);
 }

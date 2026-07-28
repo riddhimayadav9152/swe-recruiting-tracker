@@ -185,30 +185,32 @@ export const formatByKind = (value: Date | string | null | undefined, kind: Dead
 const pad2 = (value: number): string => String(value).padStart(2, '0');
 
 /**
- * Whether a deadline-shaped value (see `DeadlineKind`) counts as overdue
- * right now.
+ * Resolves a deadline-shaped value (see `DeadlineKind`) to the single UTC
+ * instant it's effectively "due at" — the shared primitive behind overdue
+ * checks, "soon" urgency, and sorting, so all three treat date-vs-timestamp
+ * deadlines the same way instead of drifting apart:
  *
- * - `timestamp` values are compared as exact instants — no timezone
- *   ambiguity, since they already represent a specific moment.
- * - `date` values are calendar dates with no time component, so "overdue"
- *   only becomes true once the *entire* calendar day has elapsed in
- *   `userTimeZone` — an August 15 deadline is due at the end of August 15 in
- *   the user's zone, not at UTC midnight on the 15th. Comparing calendar
- *   dates naively (e.g. `new Date(deadline) < new Date()`) would mark an
- *   August 15 deadline overdue as early as August 14 evening for anyone west
- *   of UTC, which is exactly the bug this helper exists to prevent.
+ * - `timestamp` values already represent a specific moment — returned as-is.
+ * - `date` values are calendar dates with no time component, resolved to the
+ *   end of that calendar day in `userTimeZone` — an August 15 deadline is
+ *   effectively due at the end of August 15 in the user's zone, not at UTC
+ *   midnight on the 15th. Resolving it any other way (e.g. treating it as
+ *   due at its own UTC-midnight-anchored instant) would sort it before same
+ *   day timestamp deadlines that are actually earlier, and would mark it
+ *   overdue as early as the previous evening for anyone west of UTC.
+ *
+ * Returns `null` for a missing/invalid value.
  */
-export const isDeadlineOverdue = (
+export const resolveDeadlineInstant = (
   value: Date | string | null | undefined,
   kind: DeadlineKind,
   userTimeZone: string,
-  now: Date = new Date(),
-): boolean => {
-  if (!value) return false;
+): Date | null => {
+  if (!value) return null;
   const date = typeof value === 'string' ? new Date(value) : value;
-  if (Number.isNaN(date.getTime())) return false;
+  if (Number.isNaN(date.getTime())) return null;
 
-  if (kind === 'timestamp') return date.getTime() < now.getTime();
+  if (kind === 'timestamp') return date;
 
   // `date`-kind values are anchored at UTC midnight by `parseDateOnly`, so
   // their intended calendar day lives in the UTC fields, not the local ones.
@@ -224,7 +226,24 @@ export const isDeadlineOverdue = (
   // month/year rollover for free via the UTC Date constructor.
   const nextDayUtc = new Date(Date.UTC(year, month, day + 1));
   const nextDayString = `${nextDayUtc.getUTCFullYear()}-${pad2(nextDayUtc.getUTCMonth() + 1)}-${pad2(nextDayUtc.getUTCDate())}T00:00:00`;
-  const endOfDeadlineDay = parseZonedDateTime(nextDayString, zone) ?? nextDayUtc;
+  return parseZonedDateTime(nextDayString, zone) ?? nextDayUtc;
+};
 
-  return now.getTime() >= endOfDeadlineDay.getTime();
+/**
+ * Whether a deadline-shaped value (see `DeadlineKind`) counts as overdue
+ * right now. See `resolveDeadlineInstant` for how date-vs-timestamp kinds
+ * are each resolved to a single instant.
+ */
+export const isDeadlineOverdue = (
+  value: Date | string | null | undefined,
+  kind: DeadlineKind,
+  userTimeZone: string,
+  now: Date = new Date(),
+): boolean => {
+  const instant = resolveDeadlineInstant(value, kind, userTimeZone);
+  if (!instant) return false;
+  // A 'date' deadline is overdue starting exactly at its end-of-day
+  // boundary (that boundary IS the moment it becomes overdue); a
+  // 'timestamp' deadline isn't overdue until strictly after its instant.
+  return kind === 'date' ? now.getTime() >= instant.getTime() : instant.getTime() < now.getTime();
 };

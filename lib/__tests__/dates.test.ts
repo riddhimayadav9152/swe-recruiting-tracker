@@ -12,6 +12,7 @@ import {
   parseDateTimeLocal,
   parseTimestamp,
   parseZonedDateTime,
+  resolveDeadlineInstant,
 } from '../dates';
 
 const TIME_ZONES = ['UTC', 'America/New_York', 'Pacific/Kiritimati', 'Pacific/Midway', 'Asia/Tokyo'];
@@ -247,6 +248,51 @@ describe('formatByKind dispatches on an explicit kind rather than inferring it f
       // gotten wrong (it would have shown "Aug 16" in both zones).
       expect(formatByKind(utcMidnightTimestamp, 'timestamp')).toMatch(/Aug 15, 2026 1:00 PM/);
     });
+  });
+});
+
+describe('resolveDeadlineInstant', () => {
+  it('returns a timestamp-kind value as-is', () => {
+    const value = new Date('2026-08-15T20:00:00.000Z');
+    expect(resolveDeadlineInstant(value, 'timestamp', 'America/New_York')?.toISOString()).toBe('2026-08-15T20:00:00.000Z');
+  });
+
+  it('resolves a date-kind value to the end of that calendar day in userTimeZone', () => {
+    const value = parseDateOnly('2026-08-15')!;
+    expect(resolveDeadlineInstant(value, 'date', 'America/New_York')?.toISOString()).toBe('2026-08-16T04:00:00.000Z'); // midnight EDT
+    expect(resolveDeadlineInstant(value, 'date', 'UTC')?.toISOString()).toBe('2026-08-16T00:00:00.000Z');
+  });
+
+  it('sorts a same-nominal-day mix of date-kind and timestamp-kind deadlines by their true effective instant', () => {
+    const userTimeZone = 'America/New_York';
+    // A same-day 8:00 PM EDT timestamp deadline is effectively DUE BEFORE an
+    // August 15 date-kind deadline, whose real due moment is the start of
+    // August 16 in New York — even though both nominally reference "Aug 15".
+    const timestampDeadline = { value: new Date('2026-08-15T20:00:00.000Z'), kind: 'timestamp' as const };
+    const dateDeadline = { value: parseDateOnly('2026-08-15')!, kind: 'date' as const };
+
+    const deadlines = [dateDeadline, timestampDeadline];
+    const sorted = [...deadlines].sort((a, b) => {
+      const aInstant = resolveDeadlineInstant(a.value, a.kind, userTimeZone)!;
+      const bInstant = resolveDeadlineInstant(b.value, b.kind, userTimeZone)!;
+      return aInstant.getTime() - bInstant.getTime();
+    });
+
+    expect(sorted[0]).toBe(timestampDeadline);
+    expect(sorted[1]).toBe(dateDeadline);
+  });
+
+  it('accounts for DST when resolving a date-kind deadline to its end-of-day instant', () => {
+    // Same spring-forward case as the isDeadlineOverdue DST test below: the
+    // boundary after March 8, 2026 already observes EDT (UTC-4), not the
+    // EST (UTC-5) the deadline's own day started under.
+    const value = parseDateOnly('2026-03-08')!;
+    expect(resolveDeadlineInstant(value, 'date', 'America/New_York')?.toISOString()).toBe('2026-03-09T04:00:00.000Z');
+  });
+
+  it('returns null for a missing or invalid value', () => {
+    expect(resolveDeadlineInstant(null, 'date', 'UTC')).toBeNull();
+    expect(resolveDeadlineInstant(undefined, 'timestamp', 'UTC')).toBeNull();
   });
 });
 

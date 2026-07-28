@@ -500,6 +500,65 @@ describe('workflow services', () => {
     ).rejects.toThrow('already has a date applied');
   });
 
+  it('rejects setting an application date on an ordinary Not Applied record with no submission evidence', async () => {
+    const application = await createApplicationRecord(prisma, {
+      company: 'Fresh Co',
+      role: 'Software Engineer',
+      applicationUrl: 'https://fresh.example.com/apply',
+      priority: 'P1',
+    });
+    expect(application.status).toBe('Not Applied');
+
+    await expect(
+      setApplicationDateWorkflow(prisma, application.id, { action: 'setApplicationDate', dateApplied: '2026-07-20' }),
+    ).rejects.toThrow('requires submission evidence');
+  });
+
+  it('rejects setting an application date on a Preparing record with no submission evidence', async () => {
+    const application = await createApplicationRecord(prisma, {
+      company: 'Prep Co',
+      role: 'Software Engineer',
+      applicationUrl: 'https://prep.example.com/apply',
+      priority: 'P1',
+      status: 'Preparing',
+    });
+
+    await expect(
+      setApplicationDateWorkflow(prisma, application.id, { action: 'setApplicationDate', dateApplied: '2026-07-20' }),
+    ).rejects.toThrow('requires submission evidence');
+  });
+
+  it('permits setting an application date on a Not Applied record when an "Application submitted" activity exists', async () => {
+    const application = await createApplicationRecord(prisma, {
+      company: 'Activity Evidence Co',
+      role: 'Software Engineer',
+      applicationUrl: 'https://activity-evidence.example.com/apply',
+      priority: 'P1',
+    });
+    await prisma.activity.create({
+      data: { applicationId: application.id, eventType: 'Application submitted', summary: 'Imported as already submitted' },
+    });
+
+    const updated = await setApplicationDateWorkflow(prisma, application.id, { action: 'setApplicationDate', dateApplied: '2026-07-20' });
+    expect(updated.dateApplied?.toISOString().slice(0, 10)).toBe('2026-07-20');
+  });
+
+  it('permits setting an application date on a Not Applied record only with the explicit confirmImportRepair flag', async () => {
+    const application = await createApplicationRecord(prisma, {
+      company: 'Explicit Flag Co',
+      role: 'Software Engineer',
+      applicationUrl: 'https://explicit-flag.example.com/apply',
+      priority: 'P1',
+    });
+
+    const updated = await setApplicationDateWorkflow(prisma, application.id, {
+      action: 'setApplicationDate',
+      dateApplied: '2026-07-20',
+      confirmImportRepair: true,
+    });
+    expect(updated.dateApplied?.toISOString().slice(0, 10)).toBe('2026-07-20');
+  });
+
   it.each([
     { timezone: 'America/New_York', expectedUtc: '2026-08-15T13:00:00.000Z' }, // 9:00 AM EDT (UTC-4)
     { timezone: 'America/Los_Angeles', expectedUtc: '2026-08-15T16:00:00.000Z' }, // 9:00 AM PDT (UTC-7)
