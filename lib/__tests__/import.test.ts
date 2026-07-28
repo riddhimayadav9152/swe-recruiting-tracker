@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   autoDetectColumnMap,
   buildImportPreview,
+  computeImportRowDiff,
   detectHeaders,
+  isTimeNumberFormat,
   normalizeImportRow,
   parseExcelDateOnlyValue,
   type ColumnMap,
+  type ExistingApplicationRecord,
 } from '../import';
 
 const BASE_MAP: ColumnMap = autoDetectColumnMap(['Company', 'Role', 'URL', 'Priority', 'Status', 'Application Deadline', 'Date Found', 'Notes']);
@@ -39,6 +42,23 @@ describe('parseExcelDateOnlyValue', () => {
     expect(parseExcelDateOnlyValue('')).toBeNull();
     expect(parseExcelDateOnlyValue(null)).toBeNull();
     expect(parseExcelDateOnlyValue(undefined)).toBeNull();
+  });
+});
+
+describe('isTimeNumberFormat', () => {
+  it('recognizes date-only Excel number formats', () => {
+    expect(isTimeNumberFormat('m/d/yy')).toBe(false);
+    expect(isTimeNumberFormat('yyyy-mm-dd')).toBe(false);
+  });
+
+  it('recognizes date+time Excel number formats', () => {
+    expect(isTimeNumberFormat('m/d/yy h:mm')).toBe(true);
+    expect(isTimeNumberFormat('yyyy-mm-dd hh:mm:ss')).toBe(true);
+  });
+
+  it('is inconclusive for a missing or generic format', () => {
+    expect(isTimeNumberFormat(undefined)).toBeNull();
+    expect(isTimeNumberFormat('General')).toBeNull();
   });
 });
 
@@ -78,6 +98,8 @@ describe('normalizeImportRow', () => {
     expect(outcome.data.dateFound).toBe('2026-07-01');
     expect(outcome.data.status).toBe('Applied');
     expect(outcome.data.priority).toBe('P1');
+    expect(outcome.fieldPresence.applicationDeadline).toBe('supplied');
+    expect(outcome.fieldPresence.notes).toBe('blank'); // Notes column IS mapped by BASE_MAP; this row just has no value under that key
   });
 
   it('defaults priority to P2 and status to Not Applied when the columns are absent', () => {
@@ -86,6 +108,15 @@ describe('normalizeImportRow', () => {
     if (outcome.ok !== true) throw new Error('expected success');
     expect(outcome.data.priority).toBe('P2');
     expect(outcome.data.status).toBe('Not Applied');
+    expect(outcome.fieldPresence.priority).toBe('blank'); // Priority column IS mapped by BASE_MAP; this row just has no value under that key
+    expect(outcome.fieldPresence.status).toBe('blank');
+  });
+
+  it('tracks blank (mapped-but-empty) separately from unmapped', () => {
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Notes: '' }, BASE_MAP);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok !== true) throw new Error('expected success');
+    expect(outcome.fieldPresence.notes).toBe('blank');
   });
 
   it('rejects (never silently coerces) an invalid priority value', () => {
@@ -152,32 +183,60 @@ describe('normalizeImportRow', () => {
     expect(outcome.data.offerDecisionDeadline).toBe('2026-08-15');
   });
 
-  it('requires OA Timezone when OA Due At is supplied, and rejects an unrecognized timezone', () => {
+  it('downgrades an OA-status row missing its schedule to Applied instead of importing a hollow Assessment', () => {
     const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'OA Due At', 'OA Timezone']);
-    const missingTz = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'OA', 'OA Due At': '2026-08-15T09:00' }, map);
-    expect(missingTz.ok).toBe(false);
-    if (missingTz.ok !== false) throw new Error('expected failure');
-    expect(missingTz.errors.some((message) => message.includes('OA Timezone'))).toBe(true);
-
-    const badTz = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'OA', 'OA Due At': '2026-08-15T09:00', 'OA Timezone': 'Nowhere/Place' }, map);
-    expect(badTz.ok).toBe(false);
-
-    const ok = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'OA', 'OA Due At': '2026-08-15T09:00', 'OA Timezone': 'America/New_York' }, map);
-    expect(ok.ok).toBe(true);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'OA', 'OA Due At': '2026-08-15T09:00' }, map);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok !== true) throw new Error('expected success');
+    expect(outcome.data.status).toBe('Applied');
+    expect(outcome.downgradedFrom).toBe('OA');
+    expect(outcome.warnings.some((message) => message.includes('OA Due At/Timezone'))).toBe(true);
   });
 
-  it('requires Interview Timezone when Interview Scheduled Start is supplied', () => {
+  it('still rejects an OA row whose timezone is actively invalid, rather than downgrading around it', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'OA Due At', 'OA Timezone']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'OA', 'OA Due At': '2026-08-15T09:00', 'OA Timezone': 'Nowhere/Place' }, map);
+    expect(outcome.ok).toBe(false);
+  });
+
+  it('accepts an OA row with a complete valid schedule', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'OA Due At', 'OA Timezone']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'OA', 'OA Due At': '2026-08-15T09:00', 'OA Timezone': 'America/New_York' }, map);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok !== true) throw new Error('expected success');
+    expect(outcome.data.status).toBe('OA');
+    expect(outcome.downgradedFrom).toBeNull();
+  });
+
+  it('downgrades an interview-stage row missing its schedule to Applied', () => {
     const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'Interview Scheduled Start', 'Interview Timezone']);
-    const missingTz = normalizeImportRow(
+    const outcome = normalizeImportRow(
       { Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Recruiter Screen', 'Interview Scheduled Start': '2026-08-15T14:00' },
       map,
     );
-    expect(missingTz.ok).toBe(false);
-    if (missingTz.ok !== false) throw new Error('expected failure');
-    expect(missingTz.errors.some((message) => message.includes('Interview Timezone'))).toBe(true);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok !== true) throw new Error('expected success');
+    expect(outcome.data.status).toBe('Applied');
+    expect(outcome.downgradedFrom).toBe('Recruiter Screen');
   });
 
-  it('sniffs an explicit Next Action Due as date-only vs datetime-local and tracks the kind', () => {
+  it('warns (without blocking) when Accepted has no offer record', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Accepted' }, map);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok !== true) throw new Error('expected success');
+    expect(outcome.warnings.some((message) => message.includes('Accepted with no offer record'))).toBe(true);
+  });
+
+  it('warns (without blocking) when a post-submission status has no Date Applied', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Applied' }, map);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok !== true) throw new Error('expected success');
+    expect(outcome.warnings.some((message) => message.includes('No Date Applied supplied'))).toBe(true);
+  });
+
+  it('sniffs an explicit string-shaped Next Action Due as date-only vs datetime-local and tracks the kind', () => {
     const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Next Action Due']);
     const dateOnly = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', 'Next Action Due': '2026-08-15' }, map);
     expect(dateOnly.ok).toBe(true);
@@ -189,6 +248,42 @@ describe('normalizeImportRow', () => {
     if (dateTime.ok !== true) throw new Error('expected success');
     expect(dateTime.data.nextActionDueKind).toBe('timestamp');
   });
+
+  it('uses the cell number format to interpret a numeric Next Action Due, preserving a fractional time', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Next Action Due']);
+    const base = { Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', 'Next Action Due': 46249.75 };
+
+    const asDateTime = normalizeImportRow(base, map, { cellFormats: { 'Next Action Due': 'm/d/yy h:mm' } });
+    expect(asDateTime.ok).toBe(true);
+    if (asDateTime.ok !== true) throw new Error('expected success');
+    expect(asDateTime.data.nextActionDueKind).toBe('timestamp');
+    // 46249.75 = Aug 15, 2026, 6:00 PM — the fractional time must survive.
+    expect(asDateTime.data.nextActionDue).toBe('2026-08-15T18:00:00');
+
+    const asDateOnly = normalizeImportRow({ ...base, 'Next Action Due': 46249 }, map, { cellFormats: { 'Next Action Due': 'm/d/yy' } });
+    expect(asDateOnly.ok).toBe(true);
+    if (asDateOnly.ok !== true) throw new Error('expected success');
+    expect(asDateOnly.data.nextActionDueKind).toBe('date');
+    expect(asDateOnly.data.nextActionDue).toBe('2026-08-15');
+  });
+
+  it('requires an explicit Date/Timestamp column-mapping choice for an ambiguous numeric Next Action Due with no usable cell format', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Next Action Due']);
+    const noFormat = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', 'Next Action Due': 46249.75 }, map);
+    expect(noFormat.ok).toBe(false);
+    if (noFormat.ok !== false) throw new Error('expected failure');
+    expect(noFormat.errors.some((message) => message.includes('choose Date or Timestamp'))).toBe(true);
+
+    const withOverride = normalizeImportRow(
+      { Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', 'Next Action Due': 46249.75 },
+      map,
+      { nextActionDueKindOverride: 'timestamp' },
+    );
+    expect(withOverride.ok).toBe(true);
+    if (withOverride.ok !== true) throw new Error('expected success');
+    expect(withOverride.data.nextActionDueKind).toBe('timestamp');
+    expect(withOverride.data.nextActionDue).toBe('2026-08-15T18:00:00');
+  });
 });
 
 describe('buildImportPreview', () => {
@@ -198,7 +293,7 @@ describe('buildImportPreview', () => {
       {},
       { Company: 'Bad Co', Role: 'SWE', URL: 'not-a-url' },
     ];
-    const preview = buildImportPreview(rows, BASE_MAP, []);
+    const preview = buildImportPreview(rows, BASE_MAP, [], []);
     expect(preview[0].status).toBe('valid');
     expect(preview[0].suggestedAction).toBe('create');
     expect(preview[1].status).toBe('blank');
@@ -208,14 +303,14 @@ describe('buildImportPreview', () => {
 
   it('flags a row as a duplicate against an existing database record by company+role', () => {
     const rows = [{ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply-2026' }];
-    const preview = buildImportPreview(rows, BASE_MAP, [{ id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply-2025' }]);
+    const preview = buildImportPreview(rows, BASE_MAP, [{ id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply-2025' } as ExistingApplicationRecord], []);
     expect(preview[0].duplicate).toEqual({ source: 'database', applicationId: 'existing-1', matchedOn: 'company+role' });
     expect(preview[0].suggestedAction).toBe('skip');
   });
 
   it('flags a row as a duplicate against an existing database record by applicationUrl', () => {
     const rows = [{ Company: 'Different Name Inc', Role: 'Different Role', URL: 'https://acme.com/apply' }];
-    const preview = buildImportPreview(rows, BASE_MAP, [{ id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply' }]);
+    const preview = buildImportPreview(rows, BASE_MAP, [{ id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply' } as ExistingApplicationRecord], []);
     expect(preview[0].duplicate).toEqual({ source: 'database', applicationId: 'existing-1', matchedOn: 'applicationUrl' });
   });
 
@@ -224,7 +319,7 @@ describe('buildImportPreview', () => {
       { Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply-1' },
       { Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply-2' },
     ];
-    const preview = buildImportPreview(rows, BASE_MAP, []);
+    const preview = buildImportPreview(rows, BASE_MAP, [], []);
     expect(preview[0].duplicate).toBeNull();
     expect(preview[1].duplicate).toEqual({ source: 'workbook', rowNumber: 2, matchedOn: 'company+role' });
     expect(preview[1].suggestedAction).toBe('skip');
@@ -235,8 +330,89 @@ describe('buildImportPreview', () => {
       { Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply' },
       { Company: 'Beta', Role: 'Data Scientist', URL: 'https://beta.com/apply' },
     ];
-    const preview = buildImportPreview(rows, BASE_MAP, []);
+    const preview = buildImportPreview(rows, BASE_MAP, [], []);
     expect(preview[0].duplicate).toBeNull();
     expect(preview[1].duplicate).toBeNull();
+  });
+
+  it('computes a field diff only for rows matching an existing database record', () => {
+    const rows = [
+      { Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Notes: 'Updated note' },
+      { Company: 'Fresh Co', Role: 'SWE', URL: 'https://fresh.example.com/apply' },
+    ];
+    const existing: ExistingApplicationRecord[] = [{
+      id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply',
+      priority: 'P2', status: 'Not Applied', location: null, applicationDeadline: null, dateFound: null,
+      dateApplied: null, notes: 'Old note', resumeVersionName: null,
+    }];
+    const preview = buildImportPreview(rows, BASE_MAP, existing, []);
+    expect(preview[0].diff).not.toBeNull();
+    const notesDiff = preview[0].diff!.find((d) => d.field === 'notes');
+    expect(notesDiff).toEqual({ field: 'notes', presence: 'supplied', previousValue: 'Old note', newValue: 'Updated note', kind: 'changed' });
+    expect(preview[1].diff).toBeNull();
+  });
+
+  it('flags a supplied resume version name that has no match as a warning, and matches case-insensitively when it exists', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Resume Version']);
+    const rows = [
+      { Company: 'Acme', Role: 'SWE', URL: 'https://acme.com/apply', 'Resume Version': 'unknown resume' },
+      { Company: 'Beta', Role: 'SWE', URL: 'https://beta.com/apply', 'Resume Version': 'SWE RESUME 2026' },
+    ];
+    const preview = buildImportPreview(rows, map, [], [{ id: 'resume-1', name: 'SWE Resume 2026' }]);
+    expect(preview[0].resumeMatch).toBeNull();
+    expect(preview[0].warnings.some((w) => w.includes('not found'))).toBe(true);
+    expect(preview[1].resumeMatch).toEqual({ id: 'resume-1', name: 'SWE Resume 2026' });
+  });
+});
+
+describe('computeImportRowDiff', () => {
+  const existing: ExistingApplicationRecord = {
+    id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply',
+    priority: 'P1', status: 'Applied', location: 'NYC', applicationDeadline: null, dateFound: null,
+    dateApplied: null, notes: 'Existing note', resumeVersionName: 'Old Resume',
+  };
+
+  it('marks an unmapped field as preserved, unchanged regardless of the normalized default', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const diff = computeImportRowDiff(existing, outcome.data, outcome.fieldPresence);
+    // priority/location were never mapped — even though normalization
+    // defaulted priority to 'P2', the diff must show the field as
+    // preserved (still 'P1'), not "changed to P2".
+    expect(diff.find((d) => d.field === 'priority')).toMatchObject({ presence: 'unmapped', previousValue: 'P1', newValue: 'P1', kind: 'preserved' });
+    expect(diff.find((d) => d.field === 'location')).toMatchObject({ presence: 'unmapped', previousValue: 'NYC', newValue: 'NYC', kind: 'preserved' });
+  });
+
+  it('marks a mapped-but-blank clearable field as a candidate clear', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Notes']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Notes: '' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const diff = computeImportRowDiff(existing, outcome.data, outcome.fieldPresence);
+    expect(diff.find((d) => d.field === 'notes')).toMatchObject({ presence: 'blank', previousValue: 'Existing note', newValue: null, kind: 'clear' });
+  });
+
+  it('marks a mapped-but-blank non-clearable field (priority/status) as preserved, not cleared', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Priority']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Priority: '' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const diff = computeImportRowDiff(existing, outcome.data, outcome.fieldPresence);
+    expect(diff.find((d) => d.field === 'priority')).toMatchObject({ kind: 'preserved' });
+  });
+
+  it('marks a supplied and differing field as changed', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Priority']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Priority: 'P0' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const diff = computeImportRowDiff(existing, outcome.data, outcome.fieldPresence);
+    expect(diff.find((d) => d.field === 'priority')).toMatchObject({ presence: 'supplied', previousValue: 'P1', newValue: 'P0', kind: 'changed' });
+  });
+
+  it('marks a supplied but identical value as unchanged', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Priority']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Priority: 'P1' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const diff = computeImportRowDiff(existing, outcome.data, outcome.fieldPresence);
+    expect(diff.find((d) => d.field === 'priority')).toMatchObject({ kind: 'unchanged' });
   });
 });

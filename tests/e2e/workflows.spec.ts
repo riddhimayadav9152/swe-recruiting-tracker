@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 import * as XLSX from 'xlsx';
 
@@ -448,4 +450,99 @@ test('repairs an imported Applied record missing its application date', async ({
   // tests running in the same shared e2e database may log the same event
   // type for their own (differently-named) applications.
   await expect(page.locator('div', { hasText: company }).filter({ hasText: 'Application date repaired' }).first()).toBeVisible();
+});
+
+test('commit API rejects an unknown action rather than silently ignoring it', async ({ page }) => {
+  const response = await page.request.post('/api/import/commit', {
+    data: { rows: [{ rowNumber: 2, action: 'delete', data: { company: 'X', role: 'Y', applicationUrl: 'https://example.com', priority: 'P1', status: 'Not Applied' } }] },
+  });
+  expect(response.status()).toBe(400);
+  const body = await response.json();
+  expect(body.error).toBe('Invalid commit request');
+});
+
+test('commit API rejects a stale/tampered matchedApplicationId that no longer matches the row', async ({ page }) => {
+  const companyA = `Stale Match A ${uniqueId()}`;
+  const companyB = `Stale Match B ${uniqueId()}`;
+  const createdA = await page.request
+    .post('/api/applications', { data: { company: companyA, role: 'Software Engineer', applicationUrl: `https://example.com/apply/${uniqueId()}`, priority: 'P1' } })
+    .then((res) => res.json());
+  await page.request.post('/api/applications', { data: { company: companyB, role: 'Software Engineer', applicationUrl: `https://example.com/apply/${uniqueId()}`, priority: 'P1' } });
+
+  // Claims to update application A's id, but the row's own company/role/URL
+  // match neither A nor anything else — the server must re-verify the match
+  // itself rather than trusting this client-supplied id at face value.
+  const response = await page.request.post('/api/import/commit', {
+    data: {
+      rows: [{
+        rowNumber: 2,
+        action: 'update',
+        matchedApplicationId: createdA.id,
+        data: {
+          company: `Totally Different Co ${uniqueId()}`, role: 'Some Other Role', applicationUrl: `https://example.com/apply/${uniqueId()}`,
+          priority: 'P1', status: 'Not Applied', applicationDeadline: null, dateFound: null,
+          dateApplied: null, assessmentDueAt: null, assessmentTimezone: null,
+          interviewScheduledStart: null, interviewTimezone: null, offerDecisionDeadline: null,
+          nextActionDue: null, nextActionDueKind: null,
+        },
+      }],
+    },
+  });
+  expect(response.ok()).toBe(true);
+  const body = await response.json();
+  expect(body.errors).toHaveLength(1);
+  expect(body.errors[0].errors[0]).toMatch(/no longer matches/);
+
+  // Company A itself must be untouched.
+  const stillA = await page.request.get(`/api/applications/${createdA.id}`).then((res) => res.json());
+  expect(stillA.company).toBe(companyA);
+});
+
+test('commit API rejects Update existing when the matched application no longer exists', async ({ page }) => {
+  const response = await page.request.post('/api/import/commit', {
+    data: {
+      rows: [{
+        rowNumber: 2,
+        action: 'update',
+        matchedApplicationId: 'does-not-exist-at-all',
+        data: {
+          company: 'Ghost Co', role: 'SWE', applicationUrl: `https://example.com/apply/${uniqueId()}`,
+          priority: 'P1', status: 'Not Applied', applicationDeadline: null, dateFound: null,
+          dateApplied: null, assessmentDueAt: null, assessmentTimezone: null,
+          interviewScheduledStart: null, interviewTimezone: null, offerDecisionDeadline: null,
+          nextActionDue: null, nextActionDueKind: null,
+        },
+      }],
+    },
+  });
+  expect(response.ok()).toBe(true);
+  const body = await response.json();
+  expect(body.errors).toHaveLength(1);
+  expect(body.errors[0].errors[0]).toMatch(/no longer exists/);
+});
+
+test('commit API automatically backs up the database before writing, and reports the backup path', async ({ page }) => {
+  const company = `Backup Check Co ${uniqueId()}`;
+  const response = await page.request.post('/api/import/commit', {
+    data: {
+      rows: [{
+        rowNumber: 2,
+        action: 'create',
+        data: {
+          company, role: 'SWE', applicationUrl: `https://example.com/apply/${uniqueId()}`,
+          priority: 'P1', status: 'Not Applied', applicationDeadline: null, dateFound: null,
+          dateApplied: null, assessmentDueAt: null, assessmentTimezone: null,
+          interviewScheduledStart: null, interviewTimezone: null, offerDecisionDeadline: null,
+          nextActionDue: null, nextActionDueKind: null,
+        },
+      }],
+    },
+  });
+  expect(response.ok()).toBe(true);
+  const body = await response.json();
+  expect(body.created).toBe(1);
+  expect(body.backup?.fileName).toMatch(/e2e-test\.db\.pre-import-.*\.bak/);
+
+  const backupPath = path.resolve(__dirname, '..', '..', 'data', 'backups', body.backup.fileName);
+  expect(fs.existsSync(backupPath)).toBe(true);
 });

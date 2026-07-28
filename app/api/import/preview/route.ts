@@ -23,7 +23,7 @@ export async function POST(request: Request) {
   const requestedSheet = formData.get('sheetName');
   const sheetName = typeof requestedSheet === 'string' && sheetNames.includes(requestedSheet) ? requestedSheet : sheetNames[0];
 
-  const rows = readWorkbookSheetRows(buffer, sheetName);
+  const { rows, cellFormats } = readWorkbookSheetRows(buffer, sheetName);
   const headers = detectHeaders(rows);
 
   let columnMap = autoDetectColumnMap(headers);
@@ -41,8 +41,22 @@ export async function POST(request: Request) {
     if (columnMap[field] && !headers.includes(columnMap[field] as string)) columnMap[field] = null;
   }
 
-  const existingApplications = await prisma.application.findMany({ select: { id: true, company: true, role: true, applicationUrl: true } });
-  const preview = buildImportPreview(rows, columnMap, existingApplications);
+  const nextActionDueKindRaw = formData.get('nextActionDueKindOverride');
+  const nextActionDueKindOverride = nextActionDueKindRaw === 'date' || nextActionDueKindRaw === 'timestamp' ? nextActionDueKindRaw : null;
+
+  const [existingApplicationsRaw, existingResumeVersions] = await Promise.all([
+    prisma.application.findMany({
+      select: {
+        id: true, company: true, role: true, applicationUrl: true, priority: true, status: true, location: true,
+        applicationDeadline: true, dateFound: true, dateApplied: true, notes: true,
+        resumeVersion: { select: { name: true } },
+      },
+    }),
+    prisma.resumeVersion.findMany({ select: { id: true, name: true } }),
+  ]);
+  const existingApplications = existingApplicationsRaw.map((app) => ({ ...app, resumeVersionName: app.resumeVersion?.name ?? null }));
+
+  const preview = buildImportPreview(rows, columnMap, existingApplications, existingResumeVersions, { cellFormats, nextActionDueKindOverride });
 
   const summary = {
     total: preview.length,
@@ -51,7 +65,8 @@ export async function POST(request: Request) {
     blank: preview.filter((row) => row.status === 'blank').length,
     duplicatesDatabase: preview.filter((row) => row.duplicate?.source === 'database').length,
     duplicatesWorkbook: preview.filter((row) => row.duplicate?.source === 'workbook').length,
+    warnings: preview.filter((row) => row.warnings.length > 0).length,
   };
 
-  return NextResponse.json({ sheetNames, sheetName, headers, columnMap, rows: preview, summary });
+  return NextResponse.json({ sheetNames, sheetName, headers, columnMap, nextActionDueKindOverride, rows: preview, summary });
 }

@@ -1,7 +1,10 @@
 import { z } from 'zod';
 import * as XLSX from 'xlsx';
-import type { PrismaClient } from '@prisma/client';
-import { isDateOnlyString, isDateTimeLocalString, isValidIanaTimeZone, parseDateOnly, parseZonedDateTime } from '@/lib/dates';
+import type { Prisma, PrismaClient } from '@prisma/client';
+
+/** Anything with the same model-delegate methods as PrismaClient — either the top-level client or an already-open interactive-transaction client. Every actual write in this module goes through this type, never opening its own nested `$transaction`, so the caller (see commitImportRow vs. commitImportRowInTransaction below) controls whether each row gets its own transaction or the whole batch shares one. */
+type ImportDbClient = Prisma.TransactionClient | PrismaClient;
+import { formatDateOnly, isDateOnlyString, isDateTimeLocalString, isValidIanaTimeZone, parseDateOnly, parseZonedDateTime } from '@/lib/dates';
 import { deriveInitialStage, generateApplicationCode, generateNextAction, priorities, statuses, type ApplicationStatus } from '@/lib/recruiting';
 
 // --- Excel date parsing -----------------------------------------------------
@@ -88,6 +91,23 @@ export const parseExcelDateTimeValue = (value: unknown): string | null => {
   return null;
 };
 
+/**
+ * Whether an Excel number-format string represents a pure date (no time
+ * component), a date+time, or is inconclusive (`null`) — used to decide how
+ * to interpret an ambiguous numeric cell (e.g. Next Action Due) instead of
+ * assuming every numeric serial is date-only. `h`/`s` format tokens next to
+ * a `:` separator indicate a time component; a format built only from
+ * date-shaped tokens (y/m/d and separators) is date-only.
+ */
+export const isTimeNumberFormat = (format: string | undefined | null): boolean | null => {
+  if (!format) return null;
+  const lower = format.toLowerCase();
+  if (lower === 'general' || lower === '@') return null;
+  if (/:/.test(lower) && /[hs]/.test(lower)) return true;
+  if (/^[\sydm/\-.,]+$/i.test(lower)) return false;
+  return null;
+};
+
 // --- Workbook parsing --------------------------------------------------------
 
 export type ParsedWorkbook = { sheetNames: string[] };
@@ -97,11 +117,45 @@ export const parseWorkbookSheetNames = (buffer: Buffer): ParsedWorkbook => {
   return { sheetNames: workbook.SheetNames };
 };
 
-export const readWorkbookSheetRows = (buffer: Buffer, sheetName: string): Array<Record<string, unknown>> => {
-  const workbook = XLSX.read(buffer, { type: 'buffer' });
+/** Per-row, per-header Excel number-format strings (`cell.z`) — used to disambiguate an otherwise-ambiguous numeric cell (see `isTimeNumberFormat`). */
+export type RowCellFormats = Record<string, string | undefined>;
+
+export type SheetRowsResult = {
+  rows: Array<Record<string, unknown>>;
+  cellFormats: RowCellFormats[];
+};
+
+export const readWorkbookSheetRows = (buffer: Buffer, sheetName: string): SheetRowsResult => {
+  // cellDates: true asks SheetJS to convert a numeric cell that's actually
+  // formatted as a date/time into a real JS Date, using its own
+  // format-aware logic — the same signal we separately inspect via `.z`
+  // below for the ambiguous "no recognized date format" case.
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const sheet = workbook.Sheets[sheetName];
-  if (!sheet) return [];
-  return XLSX.utils.sheet_to_json(sheet) as Array<Record<string, unknown>>;
+  if (!sheet) return { rows: [], cellFormats: [] };
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: null }) as Array<Record<string, unknown>>;
+
+  const ref = sheet['!ref'];
+  if (!ref) return { rows, cellFormats: rows.map(() => ({})) };
+  const range = XLSX.utils.decode_range(ref);
+  const headerRowIndex = range.s.r;
+  const headerToCol: Record<string, number> = {};
+  for (let col = range.s.c; col <= range.e.c; col += 1) {
+    const cell = sheet[XLSX.utils.encode_cell({ r: headerRowIndex, c: col })];
+    if (cell && typeof cell.v === 'string') headerToCol[cell.v] = col;
+  }
+
+  const cellFormats: RowCellFormats[] = rows.map((_, rowIdx) => {
+    const sheetRow = headerRowIndex + 1 + rowIdx;
+    const formats: RowCellFormats = {};
+    for (const [header, col] of Object.entries(headerToCol)) {
+      const cell = sheet[XLSX.utils.encode_cell({ r: sheetRow, c: col })];
+      formats[header] = cell?.z;
+    }
+    return formats;
+  });
+
+  return { rows, cellFormats };
 };
 
 export const detectHeaders = (rows: Array<Record<string, unknown>>): string[] => {
@@ -139,6 +193,31 @@ export const IMPORT_TARGET_FIELDS = [
 export type ImportTargetField = (typeof IMPORT_TARGET_FIELDS)[number];
 
 export type ColumnMap = Record<ImportTargetField, string | null>;
+
+// Fields whose *existing* value on an Update-existing row is meaningfully
+// "clearable" — i.e. nullable in the schema, so a deliberately blank mapped
+// cell is a coherent request to erase the value. company/role/applicationUrl
+// are always required (never blank on a valid row); priority/status are
+// non-nullable with real defaults, so a blank/unmapped cell there means
+// "leave as-is", never "clear" (there's nothing sensible to clear it to).
+export const CLEARABLE_IMPORT_FIELDS: readonly ImportTargetField[] = [
+  'location',
+  'applicationDeadline',
+  'dateFound',
+  'notes',
+  'dateApplied',
+  'resumeVersionName',
+  'assessmentDueAt',
+  'assessmentTimezone',
+  'assessmentPlatform',
+  'interviewScheduledStart',
+  'interviewTimezone',
+  'offerDecisionDeadline',
+  'offerCompensationSummary',
+  'outcome',
+  'nextAction',
+  'nextActionDue',
+];
 
 // Default header aliases used to auto-detect a column mapping from a
 // workbook's own header row. The user can always override any of these in
@@ -181,6 +260,7 @@ const readMapped = (row: Record<string, unknown>, columnMap: ColumnMap, field: I
   if (!header) return '';
   const value = row[header];
   if (value === undefined || value === null) return '';
+  if (value instanceof Date) return value.toISOString();
   return String(value).trim();
 };
 
@@ -190,11 +270,31 @@ const readMappedRaw = (row: Record<string, unknown>, columnMap: ColumnMap, field
   return row[header];
 };
 
+/** Whether `field`'s source cell was actually filled in, present-but-blank, or has no column mapped at all — independent of any default value normalization later applies. This is what Update-existing consults to decide whether to touch a field at all. */
+export type FieldPresence = 'supplied' | 'blank' | 'unmapped';
+export type FieldPresenceMap = Record<ImportTargetField, FieldPresence>;
+
+const computePresence = (row: Record<string, unknown>, columnMap: ColumnMap, field: ImportTargetField): FieldPresence => {
+  const header = columnMap[field];
+  if (!header) return 'unmapped';
+  const raw = row[header];
+  if (raw === undefined || raw === null) return 'blank';
+  if (raw instanceof Date) return 'supplied';
+  if (String(raw).trim() === '') return 'blank';
+  return 'supplied';
+};
+
+const computeFieldPresenceMap = (row: Record<string, unknown>, columnMap: ColumnMap): FieldPresenceMap => {
+  const map = {} as FieldPresenceMap;
+  for (const field of IMPORT_TARGET_FIELDS) map[field] = computePresence(row, columnMap, field);
+  return map;
+};
+
 // --- Row validation/normalization --------------------------------------------
 
-const STATUSES_REQUIRING_SUBMISSION_EVIDENCE: readonly ApplicationStatus[] = ['Applied', 'OA', 'Recruiter Screen', 'Technical Interview', 'Final Round', 'Offer', 'Accepted'];
-const INTERVIEW_STAGES: readonly ApplicationStatus[] = ['Recruiter Screen', 'Technical Interview', 'Final Round'];
-const TERMINAL_STATUSES: readonly ApplicationStatus[] = ['Rejected', 'Withdrawn', 'Closed', 'Accepted'];
+export const STATUSES_REQUIRING_SUBMISSION_EVIDENCE: readonly ApplicationStatus[] = ['Applied', 'OA', 'Recruiter Screen', 'Technical Interview', 'Final Round', 'Offer', 'Accepted'];
+export const INTERVIEW_STAGES: readonly ApplicationStatus[] = ['Recruiter Screen', 'Technical Interview', 'Final Round'];
+export const TERMINAL_STATUSES: readonly ApplicationStatus[] = ['Rejected', 'Withdrawn', 'Closed', 'Accepted'];
 
 const importRowSchema = z.object({
   company: z.string().trim().min(1, 'Company is required'),
@@ -224,7 +324,7 @@ const importRowSchema = z.object({
 export type NormalizedImportRow = z.infer<typeof importRowSchema>;
 
 export type ImportRowOutcome =
-  | { ok: true; data: NormalizedImportRow }
+  | { ok: true; data: NormalizedImportRow; fieldPresence: FieldPresenceMap; warnings: string[]; downgradedFrom: ApplicationStatus | null }
   | { ok: false; errors: string[] }
   | { ok: 'blank' };
 
@@ -237,10 +337,29 @@ export type ImportRowOutcome =
 export const validateNormalizedImportRow = (data: unknown): { ok: true; data: NormalizedImportRow } | { ok: false; errors: string[] } => {
   const parsed = importRowSchema.safeParse(data);
   if (!parsed.success) return { ok: false, errors: parsed.error.issues.map((issue) => issue.message) };
-  if (parsed.data.status === 'Offer' && !parsed.data.offerDecisionDeadline) {
-    return { ok: false, errors: ['Decision Deadline is required when Status is Offer'] };
-  }
+  const errors = validateStatusInvariants(parsed.data);
+  if (errors.length) return { ok: false, errors };
   return { ok: true, data: parsed.data };
+};
+
+/** Hard, commit-blocking invariants that depend on more than one field together (so they can't be expressed as a single Zod field rule). Reused by both preview-time normalization and commit-time re-validation. */
+function validateStatusInvariants(data: NormalizedImportRow): string[] {
+  const errors: string[] = [];
+  if (data.status === 'Offer' && !data.offerDecisionDeadline) {
+    errors.push('Decision Deadline is required when Status is Offer');
+  }
+  if (data.assessmentDueAt && !data.assessmentTimezone) errors.push('OA Timezone is required when OA Due At is supplied');
+  if (data.assessmentTimezone && !isValidIanaTimeZone(data.assessmentTimezone)) errors.push('OA Timezone is not a recognized IANA timezone');
+  if (data.interviewScheduledStart && !data.interviewTimezone) errors.push('Interview Timezone is required when Interview Scheduled Start is supplied');
+  if (data.interviewTimezone && !isValidIanaTimeZone(data.interviewTimezone)) errors.push('Interview Timezone is not a recognized IANA timezone');
+  if (data.nextActionDue && !data.nextActionDueKind) errors.push('Next Action Due is missing its date/timestamp kind');
+  return errors;
+}
+
+export type NormalizeRowOptions = {
+  cellFormats?: RowCellFormats;
+  /** Fallback used ONLY when Next Action Due is an ambiguous numeric cell whose format can't be inspected (e.g. no cell metadata available) — set explicitly by the user during column mapping, per item 10. */
+  nextActionDueKindOverride?: 'date' | 'timestamp' | null;
 };
 
 /**
@@ -249,8 +368,15 @@ export const validateNormalizedImportRow = (data: unknown): { ok: true; data: No
  * human-readable errors so the caller can report it and keep processing the
  * rest of the file, rather than aborting the whole import or silently
  * coercing garbage into a valid-looking record.
+ *
+ * Advanced statuses (OA, an interview stage, Accepted) that are missing the
+ * structural data a real workflow action would have required are never
+ * imported "hollow" — they're downgraded to the nearest safe, honest status
+ * (Applied) with a warning explaining what's missing and how to repair it
+ * manually afterward, rather than silently creating an Assessment/Interview
+ * with every field null.
  */
-export const normalizeImportRow = (row: Record<string, unknown>, columnMap: ColumnMap): ImportRowOutcome => {
+export const normalizeImportRow = (row: Record<string, unknown>, columnMap: ColumnMap, options: NormalizeRowOptions = {}): ImportRowOutcome => {
   const company = readMapped(row, columnMap, 'company');
   const role = readMapped(row, columnMap, 'role');
   const applicationUrl = readMapped(row, columnMap, 'applicationUrl');
@@ -260,6 +386,7 @@ export const normalizeImportRow = (row: Record<string, unknown>, columnMap: Colu
   if (!company && !role && !applicationUrl) return { ok: 'blank' };
 
   const errors: string[] = [];
+  const warnings: string[] = [];
 
   const parseMappedDateOnly = (field: ImportTargetField, label: string): string | null => {
     const raw = readMappedRaw(row, columnMap, field);
@@ -287,40 +414,90 @@ export const normalizeImportRow = (row: Record<string, unknown>, columnMap: Colu
   const assessmentTimezoneRaw = readMapped(row, columnMap, 'assessmentTimezone');
   const assessmentTimezone = assessmentTimezoneRaw || null;
   if (assessmentTimezone && !isValidIanaTimeZone(assessmentTimezone)) errors.push('OA Timezone is not a recognized IANA timezone');
-  if (assessmentDueAt && !assessmentTimezone) errors.push('OA Timezone is required when OA Due At is supplied');
 
   const interviewTimezoneRaw = readMapped(row, columnMap, 'interviewTimezone');
   const interviewTimezone = interviewTimezoneRaw || null;
   if (interviewTimezone && !isValidIanaTimeZone(interviewTimezone)) errors.push('Interview Timezone is not a recognized IANA timezone');
-  if (interviewScheduledStart && !interviewTimezone) errors.push('Interview Timezone is required when Interview Scheduled Start is supplied');
 
   // An explicit Next Action Due may be either a bare calendar date or a
-  // full datetime-local value — sniff which shape was actually supplied so
-  // its nextActionDueKind is tracked correctly (see lib/dates.ts).
+  // full datetime-local value. A STRING value's own shape is unambiguous
+  // (either it parses as "YYYY-MM-DD" or it doesn't); a NUMERIC (Excel
+  // serial) value is fundamentally ambiguous on its own — 46249 could be
+  // "August 15" or "August 15, 12:00 AM" — so it's resolved via the cell's
+  // own number-format string when available, then the user's explicit
+  // column-mapping choice, and only errors out if neither is available,
+  // rather than silently assuming every numeric serial is date-only.
   const nextActionDueRaw = readMappedRaw(row, columnMap, 'nextActionDue');
   let nextActionDue: string | null = null;
   let nextActionDueKind: 'date' | 'timestamp' | null = null;
   if (nextActionDueRaw !== undefined && nextActionDueRaw !== null && String(nextActionDueRaw).trim() !== '') {
-    const asDateOnly = parseExcelDateOnlyValue(nextActionDueRaw);
-    const asDateTime = parseExcelDateTimeValue(nextActionDueRaw);
-    if (asDateOnly && (typeof nextActionDueRaw !== 'string' || isDateOnlyString(nextActionDueRaw.trim()))) {
-      nextActionDue = asDateOnly;
-      nextActionDueKind = 'date';
-    } else if (asDateTime) {
-      nextActionDue = asDateTime;
-      nextActionDueKind = 'timestamp';
+    if (typeof nextActionDueRaw === 'string') {
+      const trimmed = nextActionDueRaw.trim();
+      if (isDateOnlyString(trimmed)) {
+        nextActionDue = trimmed;
+        nextActionDueKind = 'date';
+      } else {
+        const asDateTime = parseExcelDateTimeValue(trimmed);
+        if (asDateTime) {
+          nextActionDue = asDateTime;
+          nextActionDueKind = 'timestamp';
+        } else {
+          errors.push('Next Action Due is not a recognizable date or date/time');
+        }
+      }
+    } else if (typeof nextActionDueRaw === 'number') {
+      const header = columnMap.nextActionDue;
+      const cellFormat = header ? options.cellFormats?.[header] : undefined;
+      const formatSaysTime = isTimeNumberFormat(cellFormat);
+      const isTimeShaped = formatSaysTime ?? (options.nextActionDueKindOverride ? options.nextActionDueKindOverride === 'timestamp' : null);
+      if (isTimeShaped === null) {
+        errors.push('Next Action Due is a number with no recognizable date format — choose Date or Timestamp for this column during mapping');
+      } else if (isTimeShaped) {
+        nextActionDue = parseExcelDateTimeValue(nextActionDueRaw);
+        nextActionDueKind = 'timestamp';
+        if (!nextActionDue) errors.push('Next Action Due is not a recognizable date/time');
+      } else {
+        nextActionDue = parseExcelDateOnlyValue(nextActionDueRaw);
+        nextActionDueKind = 'date';
+        if (!nextActionDue) errors.push('Next Action Due is not a recognizable calendar date');
+      }
     } else {
-      errors.push('Next Action Due is not a recognizable date or date/time');
+      // Date object or anything else — datetime-shaped by construction.
+      nextActionDue = parseExcelDateTimeValue(nextActionDueRaw);
+      nextActionDueKind = 'timestamp';
+      if (!nextActionDue) errors.push('Next Action Due is not a recognizable date or date/time');
     }
   }
 
-  const status = readMapped(row, columnMap, 'status') || 'Not Applied';
+  let status = (readMapped(row, columnMap, 'status') || 'Not Applied') as ApplicationStatus;
+  let downgradedFrom: ApplicationStatus | null = null;
 
   // An imported Offer status must have a decision deadline — it's the one
   // sub-record field that's load-bearing enough to reject the row over,
   // rather than importing a structurally incomplete Offer.
   if (status === 'Offer' && !offerDecisionDeadline) {
     errors.push('Decision Deadline is required when Status is Offer');
+  }
+
+  // OA/interview statuses need their own schedule to avoid a hollow
+  // Assessment/Interview record (every field null) — downgrade to Applied
+  // rather than reject the whole row, since the company/role/etc are still
+  // good data worth importing.
+  if (status === 'OA' && !(assessmentDueAt && assessmentTimezone)) {
+    downgradedFrom = status;
+    status = 'Applied';
+    warnings.push('OA Due At/Timezone not supplied — imported as Applied instead of OA; use OA Received to add the assessment manually.');
+  }
+  if (INTERVIEW_STAGES.includes(status) && !(interviewScheduledStart && interviewTimezone)) {
+    downgradedFrom = status;
+    status = 'Applied';
+    warnings.push(`Interview Scheduled Start/Timezone not supplied — imported as Applied instead of ${downgradedFrom}; use Interview Received to add the interview manually.`);
+  }
+  if (status === 'Accepted' && !offerDecisionDeadline) {
+    warnings.push('Imported as Accepted with no offer record — Decision Deadline was not supplied.');
+  }
+  if (STATUSES_REQUIRING_SUBMISSION_EVIDENCE.includes(status) && !dateApplied) {
+    warnings.push('No Date Applied supplied for a post-submission status — use Set Application Date to repair this record after import.');
   }
 
   const candidate = {
@@ -353,7 +530,9 @@ export const normalizeImportRow = (row: Record<string, unknown>, columnMap: Colu
     return { ok: false, errors: [...errors, ...parsed.error.issues.map((issue) => issue.message)] };
   }
   if (errors.length) return { ok: false, errors };
-  return { ok: true, data: parsed.data };
+
+  const fieldPresence = computeFieldPresenceMap(row, columnMap);
+  return { ok: true, data: parsed.data, fieldPresence, warnings, downgradedFrom };
 };
 
 // --- Duplicate detection + preview -------------------------------------------
@@ -370,37 +549,144 @@ export type ImportDuplicateInfo =
   | { source: 'database'; applicationId: string; matchedOn: 'company+role' | 'applicationUrl' }
   | { source: 'workbook'; rowNumber: number; matchedOn: 'company+role' | 'applicationUrl' };
 
+export type ImportFieldDiffKind = 'preserved' | 'unchanged' | 'changed' | 'clear';
+
+export type ImportFieldDiff = {
+  field: ImportTargetField;
+  presence: FieldPresence;
+  previousValue: string | null;
+  newValue: string | null;
+  kind: ImportFieldDiffKind;
+};
+
+export type ResumeVersionMatch = { id: string; name: string } | null;
+
 export type PreviewRow = {
   rowNumber: number;
   status: 'valid' | 'invalid' | 'blank';
   data: NormalizedImportRow | null;
+  fieldPresence: FieldPresenceMap | null;
   errors: string[];
+  warnings: string[];
+  downgradedFrom: ApplicationStatus | null;
   duplicate: ImportDuplicateInfo | null;
   suggestedAction: ImportRowDecision | 'error' | 'blank';
+  /** Only populated when `duplicate?.source === 'database'` — what Update existing would actually change. */
+  diff: ImportFieldDiff[] | null;
+  resumeMatch: ResumeVersionMatch;
 };
 
-export type ExistingApplicationKey = { id: string; company: string; role: string; applicationUrl: string | null };
+export type ExistingApplicationRecord = {
+  id: string;
+  company: string;
+  role: string;
+  applicationUrl: string | null;
+  priority: string;
+  status: string;
+  location: string | null;
+  applicationDeadline: Date | null;
+  dateFound: Date | null;
+  dateApplied: Date | null;
+  notes: string | null;
+  resumeVersionName: string | null;
+};
 
 const normalizeKey = (value: string | null | undefined) => (value ?? '').trim().toLowerCase();
+
+const displayValue = (value: string | null | undefined): string | null => (value ? value : null);
+
+const FIELD_DISPLAY_ORDER: ImportTargetField[] = [
+  'company', 'role', 'applicationUrl', 'priority', 'status', 'location',
+  'applicationDeadline', 'dateFound', 'dateApplied', 'notes', 'resumeVersionName',
+];
+
+function getExistingDisplayValue(existing: ExistingApplicationRecord, field: ImportTargetField): string | null {
+  switch (field) {
+    case 'company': return displayValue(existing.company);
+    case 'role': return displayValue(existing.role);
+    case 'applicationUrl': return displayValue(existing.applicationUrl);
+    case 'priority': return displayValue(existing.priority);
+    case 'status': return displayValue(existing.status);
+    case 'location': return displayValue(existing.location);
+    case 'applicationDeadline': return existing.applicationDeadline ? formatDateOnly(existing.applicationDeadline) : null;
+    case 'dateFound': return existing.dateFound ? formatDateOnly(existing.dateFound) : null;
+    case 'dateApplied': return existing.dateApplied ? formatDateOnly(existing.dateApplied) : null;
+    case 'notes': return displayValue(existing.notes);
+    case 'resumeVersionName': return displayValue(existing.resumeVersionName);
+    default: return null;
+  }
+}
+
+function getNewDisplayValue(data: NormalizedImportRow, field: ImportTargetField): string | null {
+  switch (field) {
+    case 'company': return displayValue(data.company);
+    case 'role': return displayValue(data.role);
+    case 'applicationUrl': return displayValue(data.applicationUrl);
+    case 'priority': return displayValue(data.priority);
+    case 'status': return displayValue(data.status);
+    case 'location': return displayValue(data.location ?? null);
+    case 'applicationDeadline': return data.applicationDeadline;
+    case 'dateFound': return data.dateFound;
+    case 'dateApplied': return data.dateApplied;
+    case 'notes': return displayValue(data.notes ?? null);
+    case 'resumeVersionName': return displayValue(data.resumeVersionName ?? null);
+    default: return null;
+  }
+}
+
+/**
+ * Computes the before/after diff an Update-existing decision would apply —
+ * per field, whether it's preserved (unmapped, never touched), unchanged
+ * (supplied but identical), changed (supplied and different), or a
+ * candidate clear (mapped but blank — requires the caller's explicit
+ * confirmation before it's actually applied; see `confirmedClears` on
+ * `updateImportedApplication`).
+ */
+export function computeImportRowDiff(existing: ExistingApplicationRecord, data: NormalizedImportRow, fieldPresence: FieldPresenceMap): ImportFieldDiff[] {
+  return FIELD_DISPLAY_ORDER.map((field) => {
+    const presence = fieldPresence[field];
+    const previousValue = getExistingDisplayValue(existing, field);
+
+    if (presence === 'unmapped') return { field, presence, previousValue, newValue: previousValue, kind: 'preserved' };
+
+    // priority/status are never nullable and always carry a real default —
+    // a blank cell for either means "don't touch", exactly like unmapped,
+    // never "clear" (there's nothing sensible to clear it to).
+    if (presence === 'blank' && !CLEARABLE_IMPORT_FIELDS.includes(field)) {
+      return { field, presence, previousValue, newValue: previousValue, kind: 'preserved' };
+    }
+    if (presence === 'blank') {
+      return { field, presence, previousValue, newValue: null, kind: previousValue ? 'clear' : 'unchanged' };
+    }
+
+    const newValue = getNewDisplayValue(data, field);
+    return { field, presence, previousValue, newValue, kind: newValue === previousValue ? 'unchanged' : 'changed' };
+  });
+}
 
 export function buildImportPreview(
   rows: Array<Record<string, unknown>>,
   columnMap: ColumnMap,
-  existingApplications: ExistingApplicationKey[],
+  existingApplications: ExistingApplicationRecord[],
+  existingResumeVersions: Array<{ id: string; name: string }>,
+  options: { cellFormats?: RowCellFormats[]; nextActionDueKindOverride?: 'date' | 'timestamp' | null } = {},
 ): PreviewRow[] {
   const results: PreviewRow[] = [];
   const seenInWorkbook: Array<{ rowNumber: number; company: string; role: string; applicationUrl: string }> = [];
 
   rows.forEach((row, index) => {
     const rowNumber = index + 2; // row 1 is the header
-    const outcome = normalizeImportRow(row, columnMap);
+    const outcome = normalizeImportRow(row, columnMap, {
+      cellFormats: options.cellFormats?.[index],
+      nextActionDueKindOverride: options.nextActionDueKindOverride,
+    });
 
     if (outcome.ok === 'blank') {
-      results.push({ rowNumber, status: 'blank', data: null, errors: [], duplicate: null, suggestedAction: 'blank' });
+      results.push({ rowNumber, status: 'blank', data: null, fieldPresence: null, errors: [], warnings: [], downgradedFrom: null, duplicate: null, suggestedAction: 'blank', diff: null, resumeMatch: null });
       return;
     }
     if (!outcome.ok) {
-      results.push({ rowNumber, status: 'invalid', data: null, errors: outcome.errors, duplicate: null, suggestedAction: 'error' });
+      results.push({ rowNumber, status: 'invalid', data: null, fieldPresence: null, errors: outcome.errors, warnings: [], downgradedFrom: null, duplicate: null, suggestedAction: 'error', diff: null, resumeMatch: null });
       return;
     }
 
@@ -425,14 +711,27 @@ export function buildImportPreview(
       }
     }
 
+    let resumeMatch: ResumeVersionMatch = null;
+    const warnings = [...outcome.warnings];
+    if (outcome.data.resumeVersionName) {
+      const match = existingResumeVersions.find((rv) => rv.name.trim().toLowerCase() === outcome.data.resumeVersionName!.trim().toLowerCase());
+      if (match) resumeMatch = match;
+      else warnings.push(`Resume version "${outcome.data.resumeVersionName}" was not found — choose an existing resume, create a new one, or leave it blank.`);
+    }
+
     seenInWorkbook.push({ rowNumber, company, role, applicationUrl: url });
     results.push({
       rowNumber,
       status: 'valid',
       data: outcome.data,
+      fieldPresence: outcome.fieldPresence,
       errors: [],
+      warnings,
+      downgradedFrom: outcome.downgradedFrom,
       duplicate,
       suggestedAction: duplicate ? 'skip' : 'create',
+      diff: dbMatch ? computeImportRowDiff(dbMatch, outcome.data, outcome.fieldPresence) : null,
+      resumeMatch,
     });
   });
 
@@ -445,11 +744,12 @@ export type NextActionDerivation = { nextAction: string; nextActionDue: Date | n
 
 /**
  * Derives the next action text and due date for an imported row by its
- * (validated) status — this is what an equivalent manual workflow action
- * would have set, so an imported record's next action never falls back to
- * reusing the application deadline once it's past Not Applied/Preparing.
- * An explicit Next Action / Next Action Due column, when supplied and
- * validated, always overrides the derived default.
+ * (validated, possibly downgraded) status — this is what an equivalent
+ * manual workflow action would have set, so an imported record's next
+ * action never falls back to reusing the application deadline once it's
+ * past Not Applied/Preparing. An explicit Next Action / Next Action Due
+ * column, when supplied and validated, always overrides the derived
+ * default.
  */
 export function deriveImportNextAction(data: NormalizedImportRow, currentStage: string): NextActionDerivation {
   const status = data.status as ApplicationStatus;
@@ -495,7 +795,24 @@ export function deriveImportNextAction(data: NormalizedImportRow, currentStage: 
 
   // OA/interview statuses without a schedule column supplied — a safe,
   // generic default rather than reusing an unrelated applicationDeadline.
+  // (In practice this branch is now unreachable for OA/interview specifically
+  // since those get downgraded to Applied above when their schedule is
+  // missing — kept as a defensive fallback.)
   return { nextAction: generateNextAction(status, currentStage), nextActionDue: new Date(Date.now() + 4 * 86400000), nextActionDueKind: 'timestamp' };
+}
+
+// --- Resume version resolution ------------------------------------------------
+
+export type ResumeVersionDecision =
+  | { action: 'existing'; resumeVersionId: string }
+  | { action: 'create'; name: string; targetType: string }
+  | { action: 'blank' };
+
+async function resolveResumeVersionId(tx: ImportDbClient, decision: ResumeVersionDecision | undefined): Promise<string | null> {
+  if (!decision || decision.action === 'blank') return null;
+  if (decision.action === 'existing') return decision.resumeVersionId;
+  const created = await tx.resumeVersion.create({ data: { name: decision.name, targetType: decision.targetType } });
+  return created.id;
 }
 
 // --- Commit -------------------------------------------------------------------
@@ -504,51 +821,96 @@ export type ImportCommitOutcome =
   | { ok: true; applicationId: string; action: 'create' | 'update' }
   | { ok: false; errors: string[] };
 
+export type CommitRowOptions = {
+  resumeVersionDecision?: ResumeVersionDecision;
+  /** Fields the caller has explicitly confirmed should be CLEARED on an update, having reviewed the diff (see computeImportRowDiff) — any other 'blank'-presence field is preserved instead. */
+  confirmedClears?: ImportTargetField[];
+};
+
 /**
- * Writes one already-validated, already-decided import row to the
- * database. Every code path runs inside its own `$transaction`, so a
- * failure partway through this row's writes (application + sub-records +
- * activity) rolls back only this row — rows already committed earlier in
- * the same import batch are unaffected, and rows after it are still
- * attempted.
+ * Dispatches one already-validated, already-decided import row's writes
+ * (application + sub-records + activity) against whatever `tx` client is
+ * passed in. Never opens its own transaction — that's the caller's choice:
+ * `commitImportRow` below wraps a single call in its own `$transaction` for
+ * per-row mode (a failure here rolls back only this row); the entire-batch
+ * commit mode instead passes an already-open transaction shared across every
+ * row (see app/api/import/commit/route.ts), so any row's failure rolls back
+ * the whole batch.
  */
+async function writeImportRow(
+  tx: ImportDbClient,
+  action: CommittableImportRowAction,
+  data: NormalizedImportRow,
+  existingCodes: string[],
+  matchedApplicationId: string | null,
+  fieldPresence: FieldPresenceMap | undefined,
+  rowOptions: CommitRowOptions,
+): Promise<{ applicationId: string; action: 'create' | 'update' }> {
+  if (action === 'update') {
+    if (!matchedApplicationId) throw new Error('No matching existing application to update');
+    const applicationId = await updateImportedApplication(tx, matchedApplicationId, data, fieldPresence, rowOptions);
+    return { applicationId, action: 'update' };
+  }
+
+  // action is 'create' or 'importAnyway' — both create a new row; the only
+  // difference is that 'importAnyway' was chosen deliberately despite a
+  // flagged duplicate, which the caller already resolved before getting here.
+  const applicationId = await createImportedApplication(tx, data, existingCodes, rowOptions);
+  return { applicationId, action: 'create' };
+}
+
+/** Per-row commit mode: this row's writes get their own transaction, so a failure here never affects rows committed earlier or attempted after it in the same batch. */
 export async function commitImportRow(
   prisma: PrismaClient,
   action: CommittableImportRowAction,
   data: NormalizedImportRow,
   existingCodes: string[],
   matchedApplicationId: string | null,
+  fieldPresence: FieldPresenceMap | undefined,
+  rowOptions: CommitRowOptions = {},
 ): Promise<ImportCommitOutcome> {
   try {
-    if (action === 'update') {
-      if (!matchedApplicationId) return { ok: false, errors: ['No matching existing application to update'] };
-      const applicationId = await updateImportedApplication(prisma, matchedApplicationId, data);
-      return { ok: true, applicationId, action: 'update' };
-    }
-
-    // action is 'create' or 'importAnyway' — both create a new row; the
-    // only difference is that 'importAnyway' was chosen deliberately
-    // despite a flagged duplicate, which the caller already resolved
-    // before getting here.
-    const applicationId = await createImportedApplication(prisma, data, existingCodes);
-    return { ok: true, applicationId, action: 'create' };
+    const result = await prisma.$transaction((tx) => writeImportRow(tx, action, data, existingCodes, matchedApplicationId, fieldPresence, rowOptions));
+    return { ok: true, ...result };
   } catch (error) {
     return { ok: false, errors: [error instanceof Error ? error.message : 'Unknown error writing this row'] };
   }
 }
 
-async function createImportedApplication(prisma: PrismaClient, data: NormalizedImportRow, existingCodes: string[]): Promise<string> {
+/** Entire-batch commit mode: `tx` is a transaction already opened around the whole batch by the caller — throwing here rolls back every row in the batch, not just this one. */
+export async function commitImportRowInTransaction(
+  tx: Prisma.TransactionClient,
+  action: CommittableImportRowAction,
+  data: NormalizedImportRow,
+  existingCodes: string[],
+  matchedApplicationId: string | null,
+  fieldPresence: FieldPresenceMap | undefined,
+  rowOptions: CommitRowOptions = {},
+): Promise<{ applicationId: string; action: 'create' | 'update' }> {
+  return writeImportRow(tx, action, data, existingCodes, matchedApplicationId, fieldPresence, rowOptions);
+}
+
+async function createImportedApplication(tx: ImportDbClient, data: NormalizedImportRow, existingCodes: string[], rowOptions: CommitRowOptions): Promise<string> {
   const status = data.status as ApplicationStatus;
   const currentStage = deriveInitialStage(status);
   const applicationCode = generateApplicationCode(data.company, data.role, new Date(), existingCodes);
   const { nextAction, nextActionDue, nextActionDueKind } = deriveImportNextAction(data, currentStage);
-  const dateApplied = STATUSES_REQUIRING_SUBMISSION_EVIDENCE.includes(status) && data.dateApplied ? parseDateOnly(data.dateApplied) : null;
+  // Preserve an explicitly-supplied Date Applied regardless of status — even
+  // a Rejected/Withdrawn/Closed row can genuinely have applied before being
+  // turned down, and the sheet saying so is real historical data, not
+  // something to second-guess and discard. (STATUSES_REQUIRING_SUBMISSION_EVIDENCE
+  // governs the separate "should the missing-date warning fire" question —
+  // see hasSubmittedApplication in lib/workflow-policy.ts — not whether a
+  // value the user actually gave us gets kept.)
+  const dateApplied = data.dateApplied ? parseDateOnly(data.dateApplied) : null;
 
-  const resumeVersion = data.resumeVersionName
-    ? await prisma.resumeVersion.findFirst({ where: { name: { equals: data.resumeVersionName } } })
-    : null;
+  const resumeVersionId = rowOptions.resumeVersionDecision
+    ? await resolveResumeVersionId(tx, rowOptions.resumeVersionDecision)
+    : data.resumeVersionName
+      ? (await tx.resumeVersion.findFirst({ where: { name: { equals: data.resumeVersionName } } }))?.id ?? null
+      : null;
 
-  const applicationId = await prisma.$transaction(async (tx) => {
+  {
     const application = await tx.application.create({
       data: {
         applicationCode,
@@ -566,7 +928,7 @@ async function createImportedApplication(prisma: PrismaClient, data: NormalizedI
         nextAction,
         nextActionDue,
         nextActionDueKind,
-        resumeVersionId: resumeVersion?.id ?? null,
+        resumeVersionId,
         outcome: TERMINAL_STATUSES.includes(status) ? data.outcome ?? null : null,
       },
     });
@@ -631,33 +993,157 @@ async function createImportedApplication(prisma: PrismaClient, data: NormalizedI
       });
     }
 
+    existingCodes.push(applicationCode);
     return application.id;
-  });
-
-  existingCodes.push(applicationCode);
-  return applicationId;
+  }
 }
 
-async function updateImportedApplication(prisma: PrismaClient, applicationId: string, data: NormalizedImportRow): Promise<string> {
-  await prisma.application.update({
-    where: { id: applicationId },
-    data: {
-      company: data.company,
-      role: data.role,
-      applicationUrl: data.applicationUrl,
-      priority: data.priority,
-      location: data.location ?? null,
-      applicationDeadline: data.applicationDeadline ? parseDateOnly(data.applicationDeadline) : null,
-      dateFound: data.dateFound ? parseDateOnly(data.dateFound) : undefined,
-      notes: data.notes ?? undefined,
-    },
-  });
-  await prisma.activity.create({
-    data: {
-      applicationId,
-      eventType: 'Updated from workbook',
-      summary: `Updated ${data.company} from re-imported workbook row`,
-    },
-  });
-  return applicationId;
+async function updateImportedApplication(
+  tx: ImportDbClient,
+  applicationId: string,
+  data: NormalizedImportRow,
+  fieldPresence: FieldPresenceMap | undefined,
+  rowOptions: CommitRowOptions,
+): Promise<string> {
+  const presence = fieldPresence ?? ({} as FieldPresenceMap);
+  const confirmedClears = new Set(rowOptions.confirmedClears ?? []);
+
+  // Per field: 'unmapped' never touches the existing value; 'blank' only
+  // touches it if the caller explicitly confirmed clearing it (after
+  // reviewing the diff); 'supplied' always applies the new value. This is
+  // the whole point of field-presence tracking — Update existing must
+  // never silently blank out location/notes/etc just because a column
+  // wasn't mapped in this particular workbook.
+  const include = (field: ImportTargetField): boolean => {
+    const state = presence[field];
+    if (state === 'unmapped' || state === undefined) return false;
+    if (state === 'blank') return CLEARABLE_IMPORT_FIELDS.includes(field) && confirmedClears.has(field);
+    return true;
+  };
+
+  {
+    const existing = await tx.application.findUniqueOrThrow({ where: { id: applicationId } });
+    const previousStatus = existing.status;
+    const previousStage = existing.currentStage;
+
+    const nextStatus = include('status') ? (data.status as ApplicationStatus) : (previousStatus as ApplicationStatus);
+    const statusChanged = nextStatus !== previousStatus;
+    const currentStage = statusChanged ? deriveInitialStage(nextStatus) : previousStage;
+
+    const resumeVersionId = rowOptions.resumeVersionDecision
+      ? await resolveResumeVersionId(tx, rowOptions.resumeVersionDecision)
+      : include('resumeVersionName') && data.resumeVersionName
+        ? (await tx.resumeVersion.findFirst({ where: { name: { equals: data.resumeVersionName } } }))?.id ?? null
+        : include('resumeVersionName')
+          ? null // explicitly confirmed clear
+          : undefined;
+
+    const applicationData: Record<string, unknown> = {};
+    if (include('company')) applicationData.company = data.company;
+    if (include('role')) applicationData.role = data.role;
+    if (include('applicationUrl')) applicationData.applicationUrl = data.applicationUrl;
+    if (include('priority')) applicationData.priority = data.priority;
+    if (include('location')) applicationData.location = data.location ?? null;
+    if (include('applicationDeadline')) applicationData.applicationDeadline = data.applicationDeadline ? parseDateOnly(data.applicationDeadline) : null;
+    if (include('dateFound')) applicationData.dateFound = data.dateFound ? parseDateOnly(data.dateFound) : null;
+    if (include('notes')) applicationData.notes = data.notes ?? null;
+    if (include('dateApplied')) applicationData.dateApplied = data.dateApplied ? parseDateOnly(data.dateApplied) : null;
+    if (resumeVersionId !== undefined) applicationData.resumeVersionId = resumeVersionId;
+    if (statusChanged) {
+      applicationData.status = nextStatus;
+      applicationData.currentStage = currentStage;
+    }
+
+    // Deriving next action / due date and clearing terminal-status
+    // deadlines only matters when the status actually changed (or an
+    // explicit Next Action / Next Action Due override was supplied) —
+    // otherwise leave the application's existing next action alone.
+    if (statusChanged || include('nextAction') || include('nextActionDue')) {
+      const derivation = deriveImportNextAction({ ...data, status: nextStatus }, currentStage ?? deriveInitialStage(nextStatus));
+      applicationData.nextAction = derivation.nextAction;
+      applicationData.nextActionDue = derivation.nextActionDue;
+      applicationData.nextActionDueKind = derivation.nextActionDueKind;
+    }
+    if (TERMINAL_STATUSES.includes(nextStatus) && statusChanged) {
+      applicationData.nextActionDue = null;
+    }
+    if (statusChanged && TERMINAL_STATUSES.includes(nextStatus) && include('outcome')) {
+      applicationData.outcome = data.outcome ?? null;
+    } else if (include('outcome') && TERMINAL_STATUSES.includes(previousStatus as ApplicationStatus)) {
+      applicationData.outcome = data.outcome ?? null;
+    }
+
+    await tx.application.update({ where: { id: applicationId }, data: applicationData });
+
+    // Upsert the sub-record appropriate to the (possibly newly-updated)
+    // status, so an advanced-status update never leaves a stale/missing
+    // related record inconsistent with what the application now says.
+    if (nextStatus === 'OA' && (include('assessmentDueAt') || include('assessmentTimezone') || include('assessmentPlatform') || statusChanged)) {
+      const dueAt = data.assessmentDueAt && data.assessmentTimezone ? parseZonedDateTime(data.assessmentDueAt, data.assessmentTimezone) : null;
+      const existingAssessment = await tx.assessment.findFirst({ where: { applicationId, type: 'OA' }, orderBy: { id: 'desc' } });
+      if (existingAssessment) {
+        await tx.assessment.update({
+          where: { id: existingAssessment.id },
+          data: {
+            dueAt: include('assessmentDueAt') ? dueAt : undefined,
+            timezone: include('assessmentTimezone') ? data.assessmentTimezone : undefined,
+            platform: include('assessmentPlatform') ? data.assessmentPlatform ?? null : undefined,
+          },
+        });
+      } else {
+        await tx.assessment.create({ data: { applicationId, type: 'OA', dueAt, timezone: data.assessmentTimezone, platform: data.assessmentPlatform ?? null } });
+      }
+    }
+
+    if (INTERVIEW_STAGES.includes(nextStatus) && (include('interviewScheduledStart') || include('interviewTimezone') || statusChanged)) {
+      const scheduledStart = data.interviewScheduledStart && data.interviewTimezone ? parseZonedDateTime(data.interviewScheduledStart, data.interviewTimezone) : null;
+      const existingInterview = await tx.interview.findFirst({ where: { applicationId, stage: nextStatus }, orderBy: { id: 'desc' } });
+      if (existingInterview) {
+        await tx.interview.update({
+          where: { id: existingInterview.id },
+          data: {
+            scheduledStart: include('interviewScheduledStart') ? scheduledStart : undefined,
+            timezone: include('interviewTimezone') ? data.interviewTimezone : undefined,
+          },
+        });
+      } else {
+        await tx.interview.create({ data: { applicationId, stage: nextStatus, scheduledStart, timezone: data.interviewTimezone } });
+      }
+    }
+
+    if (nextStatus === 'Offer' && (include('offerDecisionDeadline') || include('offerCompensationSummary') || statusChanged)) {
+      await tx.offer.upsert({
+        where: { applicationId },
+        create: {
+          applicationId,
+          decisionDeadline: data.offerDecisionDeadline ? parseDateOnly(data.offerDecisionDeadline) : null,
+          compensationSummary: data.offerCompensationSummary ?? null,
+        },
+        update: {
+          decisionDeadline: include('offerDecisionDeadline') ? (data.offerDecisionDeadline ? parseDateOnly(data.offerDecisionDeadline) : null) : undefined,
+          compensationSummary: include('offerCompensationSummary') ? data.offerCompensationSummary ?? null : undefined,
+        },
+      });
+    }
+
+    await tx.activity.create({
+      data: {
+        applicationId,
+        eventType: 'Updated from workbook',
+        previousStatus,
+        newStatus: statusChanged ? nextStatus : null,
+        previousStage: statusChanged ? previousStage : null,
+        newStage: statusChanged ? currentStage : null,
+        summary: statusChanged ? `Updated ${data.company} from re-imported workbook row (status: ${previousStatus} → ${nextStatus})` : `Updated ${data.company} from re-imported workbook row`,
+      },
+    });
+
+    if (statusChanged && STATUSES_REQUIRING_SUBMISSION_EVIDENCE.includes(nextStatus) && !existing.dateApplied && !include('dateApplied')) {
+      await tx.activity.create({
+        data: { applicationId, eventType: 'Application submitted', summary: 'Marked as submitted via import update' },
+      });
+    }
+
+    return applicationId;
+  }
 }

@@ -67,22 +67,30 @@ const IMPORT_FIELD_LABELS: Record<ImportTargetField, string> = {
 type ImportColumnMap = Record<ImportTargetField, string | null>;
 type ImportRowDecision = 'create' | 'update' | 'skip' | 'importAnyway';
 type ImportDuplicateInfo = { source: 'database' | 'workbook'; applicationId?: string; rowNumber?: number; matchedOn: string } | null;
+type ImportFieldDiff = { field: ImportTargetField; presence: 'supplied' | 'blank' | 'unmapped'; previousValue: string | null; newValue: string | null; kind: 'preserved' | 'unchanged' | 'changed' | 'clear' };
+type ImportResumeMatch = { id: string; name: string } | null;
 type ImportPreviewRow = {
   rowNumber: number;
   status: 'valid' | 'invalid' | 'blank';
   data: Record<string, unknown> | null;
   errors: string[];
+  warnings: string[];
+  downgradedFrom: string | null;
   duplicate: ImportDuplicateInfo;
   suggestedAction: ImportRowDecision | 'error' | 'blank';
+  diff: ImportFieldDiff[] | null;
+  resumeMatch: ImportResumeMatch;
 };
 type ImportPreviewResponse = {
   sheetNames: string[];
   sheetName: string;
   headers: string[];
   columnMap: ImportColumnMap;
+  nextActionDueKindOverride: 'date' | 'timestamp' | null;
   rows: ImportPreviewRow[];
-  summary: { total: number; valid: number; invalid: number; blank: number; duplicatesDatabase: number; duplicatesWorkbook: number };
+  summary: { total: number; valid: number; invalid: number; blank: number; duplicatesDatabase: number; duplicatesWorkbook: number; warnings: number };
 };
+type ImportResumeDecision = { action: 'existing'; resumeVersionId: string } | { action: 'create'; name: string; targetType: string } | { action: 'blank' };
 
 type QuickAction = 'apply' | 'oaReceived' | 'oaCompleted' | 'interviewReceived' | 'interviewCompleted' | 'reject' | 'offer' | 'note' | 'contact' | 'setApplicationDate';
 
@@ -186,8 +194,12 @@ export default function TrackerShell() {
   const [importFileHandle, setImportFileHandle] = useState<File | null>(null);
   const [importPreview, setImportPreview] = useState<ImportPreviewResponse | null>(null);
   const [importRowActions, setImportRowActions] = useState<Record<number, ImportRowDecision>>({});
+  const [importResumeDecisions, setImportResumeDecisions] = useState<Record<number, ImportResumeDecision>>({});
+  const [importConfirmedClears, setImportConfirmedClears] = useState<Record<number, Set<ImportTargetField>>>({});
+  const [importCommitMode, setImportCommitMode] = useState<'per-row' | 'batch'>('per-row');
+  const [importNextActionDueKindOverride, setImportNextActionDueKindOverride] = useState<'date' | 'timestamp' | ''>('');
   const [importLoading, setImportLoading] = useState(false);
-  const [importResult, setImportResult] = useState<{ created: number; updated: number; skipped: number; errors: Array<{ rowNumber: number; errors: string[] }> } | null>(null);
+  const [importResult, setImportResult] = useState<{ created: number; updated: number; skipped: number; errors: Array<{ rowNumber: number; errors: string[] }>; mode: string; backup: { path: string; fileName: string } } | null>(null);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -389,13 +401,14 @@ export default function TrackerShell() {
     toast.success('Excel export downloaded');
   };
 
-  const fetchImportPreview = async (file: File, sheetName?: string, columnMapOverrides?: Partial<ImportColumnMap>) => {
+  const fetchImportPreview = async (file: File, sheetName?: string, columnMapOverrides?: Partial<ImportColumnMap>, nextActionDueKindOverride?: 'date' | 'timestamp' | '') => {
     setImportLoading(true);
     try {
       const formData = new FormData();
       formData.append('file', file);
       if (sheetName) formData.append('sheetName', sheetName);
       if (columnMapOverrides) formData.append('columnMapOverrides', JSON.stringify(columnMapOverrides));
+      if (nextActionDueKindOverride) formData.append('nextActionDueKindOverride', nextActionDueKindOverride);
       const response = await fetch('/api/import/preview', { method: 'POST', body: formData });
       const data = await response.json();
       if (!response.ok) {
@@ -404,10 +417,15 @@ export default function TrackerShell() {
       }
       setImportPreview(data);
       const initialActions: Record<number, ImportRowDecision> = {};
+      const initialResumeDecisions: Record<number, ImportResumeDecision> = {};
       for (const row of data.rows as ImportPreviewRow[]) {
-        if (row.status === 'valid') initialActions[row.rowNumber] = (row.suggestedAction as ImportRowDecision) ?? 'create';
+        if (row.status !== 'valid') continue;
+        initialActions[row.rowNumber] = (row.suggestedAction as ImportRowDecision) ?? 'create';
+        initialResumeDecisions[row.rowNumber] = row.resumeMatch ? { action: 'existing', resumeVersionId: row.resumeMatch.id } : { action: 'blank' };
       }
       setImportRowActions(initialActions);
+      setImportResumeDecisions(initialResumeDecisions);
+      setImportConfirmedClears({});
     } finally {
       setImportLoading(false);
     }
@@ -429,13 +447,30 @@ export default function TrackerShell() {
 
   const handleImportColumnMapChange = async (field: ImportTargetField, header: string) => {
     if (!importFileHandle || !importPreview) return;
-    await fetchImportPreview(importFileHandle, importPreview.sheetName, { ...importPreview.columnMap, [field]: header || null });
+    await fetchImportPreview(importFileHandle, importPreview.sheetName, { ...importPreview.columnMap, [field]: header || null }, importNextActionDueKindOverride);
+  };
+
+  const handleImportNextActionDueKindChange = async (value: 'date' | 'timestamp' | '') => {
+    setImportNextActionDueKindOverride(value);
+    if (!importFileHandle || !importPreview) return;
+    await fetchImportPreview(importFileHandle, importPreview.sheetName, importPreview.columnMap, value);
+  };
+
+  const toggleConfirmedClear = (rowNumber: number, field: ImportTargetField) => {
+    setImportConfirmedClears((prev) => {
+      const current = new Set(prev[rowNumber] ?? []);
+      if (current.has(field)) current.delete(field);
+      else current.add(field);
+      return { ...prev, [rowNumber]: current };
+    });
   };
 
   const resetImportWizard = () => {
     setImportFileHandle(null);
     setImportPreview(null);
     setImportRowActions({});
+    setImportResumeDecisions({});
+    setImportConfirmedClears({});
   };
 
   const confirmImport = async () => {
@@ -449,12 +484,14 @@ export default function TrackerShell() {
           action: importRowActions[row.rowNumber] ?? 'create',
           data: row.data,
           matchedApplicationId: row.duplicate?.source === 'database' ? row.duplicate.applicationId ?? null : null,
+          resumeVersionDecision: importResumeDecisions[row.rowNumber],
+          confirmedClears: Array.from(importConfirmedClears[row.rowNumber] ?? []),
         }));
 
       const response = await fetch('/api/import/commit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows }),
+        body: JSON.stringify({ mode: importCommitMode, rows }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -462,7 +499,11 @@ export default function TrackerShell() {
         return;
       }
       setImportResult(data);
-      toast.success(`Imported: ${data.created} created, ${data.updated} updated, ${data.skipped} skipped${data.errors.length ? `, ${data.errors.length} failed` : ''}`);
+      if (data.errors.length && importCommitMode === 'batch') {
+        toast.error(`Batch import aborted — nothing was written: ${data.errors[0]?.errors?.[0] ?? 'unknown error'}`);
+      } else {
+        toast.success(`Imported: ${data.created} created, ${data.updated} updated, ${data.skipped} skipped${data.errors.length ? `, ${data.errors.length} failed` : ''} (backup: ${data.backup?.fileName})`);
+      }
       resetImportWizard();
       await loadData();
     } finally {
@@ -912,6 +953,7 @@ export default function TrackerShell() {
                         <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-500">{importPreview.summary.blank} blank</span>
                         <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">{importPreview.summary.duplicatesDatabase} match existing records</span>
                         <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">{importPreview.summary.duplicatesWorkbook} duplicate within workbook</span>
+                        <span className="rounded-full bg-sky-50 px-3 py-1 text-sky-700">{importPreview.summary.warnings} row(s) with warnings</span>
                       </div>
 
                       <details className="rounded-lg border border-[#ffcad4] p-3">
@@ -930,6 +972,18 @@ export default function TrackerShell() {
                               </select>
                             </label>
                           ))}
+                          <label className="text-xs text-slate-600">
+                            Next Action Due — ambiguous numeric cells
+                            <select
+                              value={importNextActionDueKindOverride}
+                              onChange={(e) => handleImportNextActionDueKindChange(e.target.value as 'date' | 'timestamp' | '')}
+                              className="mt-1 block w-full rounded-lg border border-[#ffc4d6] bg-white p-2 text-sm outline-none focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]"
+                            >
+                              <option value="">Infer from cell format (default)</option>
+                              <option value="date">Treat as Date</option>
+                              <option value="timestamp">Treat as Timestamp</option>
+                            </select>
+                          </label>
                         </div>
                       </details>
 
@@ -941,26 +995,79 @@ export default function TrackerShell() {
                               <th className="px-2 py-2">Company</th>
                               <th className="px-2 py-2">Role</th>
                               <th className="px-2 py-2">Status</th>
-                              <th className="px-2 py-2">Issue / duplicate</th>
+                              <th className="px-2 py-2">Issue / duplicate / warnings</th>
                               <th className="px-2 py-2">Action</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {importPreview.rows.filter((row) => row.status !== 'blank').map((row) => (
-                              <tr key={row.rowNumber} data-testid="import-preview-row" className="border-b border-[#fadde1]">
+                            {importPreview.rows.filter((row) => row.status !== 'blank').map((row) => {
+                              const action = importRowActions[row.rowNumber] ?? 'create';
+                              const resumeNameSupplied = typeof row.data?.resumeVersionName === 'string' && row.data.resumeVersionName;
+                              return (
+                              <tr key={row.rowNumber} data-testid="import-preview-row" className="border-b border-[#fadde1] align-top">
                                 <td className="px-2 py-2 text-slate-500">{row.rowNumber}</td>
                                 <td className="px-2 py-2">{typeof row.data?.company === 'string' ? row.data.company : '—'}</td>
                                 <td className="px-2 py-2">{typeof row.data?.role === 'string' ? row.data.role : '—'}</td>
                                 <td className="px-2 py-2">{typeof row.data?.status === 'string' ? row.data.status : '—'}</td>
                                 <td className="px-2 py-2 text-xs">
                                   {row.status === 'invalid' && <span data-testid="import-row-error" className="text-rose-600">{row.errors.join('; ')}</span>}
-                                  {row.duplicate?.source === 'database' && <span className="text-amber-700">Matches an existing application</span>}
-                                  {row.duplicate?.source === 'workbook' && <span className="text-amber-700">Duplicates row {row.duplicate.rowNumber} in this sheet</span>}
+                                  {row.duplicate?.source === 'database' && <div className="text-amber-700">Matches an existing application</div>}
+                                  {row.duplicate?.source === 'workbook' && <div className="text-amber-700">Duplicates row {row.duplicate.rowNumber} in this sheet</div>}
+                                  {row.downgradedFrom && <div data-testid="import-row-downgraded" className="text-sky-700">Downgraded from {row.downgradedFrom}</div>}
+                                  {row.warnings.map((warning) => <div key={warning} data-testid="import-row-warning" className="text-sky-700">{warning}</div>)}
+
+                                  {action === 'update' && row.diff && (
+                                    <table className="mt-2 w-full border-collapse text-xs">
+                                      <tbody>
+                                        {row.diff.filter((d) => d.kind !== 'preserved').map((d) => (
+                                          <tr key={d.field} className="border-t border-[#ffcad4]">
+                                            <td className="py-1 pr-2 text-slate-500">{IMPORT_FIELD_LABELS[d.field]}</td>
+                                            <td className="py-1 pr-2">
+                                              {d.kind === 'unchanged' && <span className="text-slate-400">unchanged ({d.previousValue ?? '—'})</span>}
+                                              {d.kind === 'changed' && <span className="text-emerald-700">{d.previousValue ?? '—'} → {d.newValue ?? '—'}</span>}
+                                              {d.kind === 'clear' && (
+                                                <label className="flex items-center gap-1 text-rose-700">
+                                                  <input
+                                                    type="checkbox"
+                                                    checked={importConfirmedClears[row.rowNumber]?.has(d.field) ?? false}
+                                                    onChange={() => toggleConfirmedClear(row.rowNumber, d.field)}
+                                                  />
+                                                  Clear &ldquo;{d.previousValue}&rdquo;? (destructive — requires confirmation)
+                                                </label>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  )}
+
+                                  {resumeNameSupplied && !row.resumeMatch && (
+                                    <div className="mt-2">
+                                      <select
+                                        data-testid="import-resume-decision"
+                                        value={importResumeDecisions[row.rowNumber]?.action ?? 'blank'}
+                                        onChange={(e) => {
+                                          const value = e.target.value;
+                                          setImportResumeDecisions((prev) => ({
+                                            ...prev,
+                                            [row.rowNumber]: value === 'create'
+                                              ? { action: 'create', name: resumeNameSupplied, targetType: 'SWE' }
+                                              : { action: 'blank' },
+                                          }));
+                                        }}
+                                        className="rounded-lg border border-[#ffc4d6] bg-white p-1 text-xs outline-none focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]"
+                                      >
+                                        <option value="blank">Leave resume blank</option>
+                                        <option value="create">Create new resume &ldquo;{resumeNameSupplied}&rdquo;</option>
+                                      </select>
+                                    </div>
+                                  )}
                                 </td>
                                 <td className="px-2 py-2">
                                   {row.status === 'valid' ? (
                                     <select
-                                      value={importRowActions[row.rowNumber] ?? 'create'}
+                                      value={action}
                                       onChange={(e) => setImportRowActions((prev) => ({ ...prev, [row.rowNumber]: e.target.value as ImportRowDecision }))}
                                       className="rounded-lg border border-[#ffc4d6] bg-white p-1.5 text-sm outline-none focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]"
                                     >
@@ -979,9 +1086,23 @@ export default function TrackerShell() {
                                   )}
                                 </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                           </tbody>
                         </table>
+                      </div>
+
+                      <div className="rounded-lg border border-[#ffcad4] bg-[#fadde1]/40 p-3 text-sm">
+                        <label className="flex items-center gap-2 font-medium text-slate-700">
+                          <input type="radio" name="commit-mode" checked={importCommitMode === 'per-row'} onChange={() => setImportCommitMode('per-row')} />
+                          Per-row (recommended)
+                        </label>
+                        <p className="ml-6 text-xs text-slate-500">Each row is written in its own transaction — a failure on one row is reported but does not affect any other row.</p>
+                        <label className="mt-2 flex items-center gap-2 font-medium text-slate-700">
+                          <input type="radio" name="commit-mode" checked={importCommitMode === 'batch'} onChange={() => setImportCommitMode('batch')} />
+                          Entire batch (all-or-nothing)
+                        </label>
+                        <p className="ml-6 text-xs text-slate-500">Every row is written in a single transaction — if any row fails, the whole import is rolled back and nothing is written.</p>
                       </div>
 
                       <div className="flex justify-end gap-2">
@@ -999,7 +1120,12 @@ export default function TrackerShell() {
 
                   {importResult && (
                     <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
-                      <h3 className="text-lg font-semibold">Import result</h3>
+                      <h3 className="text-lg font-semibold">Import result ({importResult.mode} mode)</h3>
+                      {importResult.backup && (
+                        <p className="mt-1 text-xs text-slate-500" data-testid="import-backup-path">
+                          Database backed up to <code>{importResult.backup.fileName}</code> before any writes.
+                        </p>
+                      )}
                       <p className="mt-2 text-sm text-slate-600">
                         {importResult.created} created • {importResult.updated} updated • {importResult.skipped} skipped
                         {importResult.errors.length > 0 && ` • ${importResult.errors.length} failed`}

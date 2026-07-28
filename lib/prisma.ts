@@ -22,6 +22,11 @@ const resolveDatabaseUrl = () => {
 
 const databaseUrl = resolveDatabaseUrl();
 
+// The plain absolute filesystem path backing `databaseUrl` — used by
+// lib/db-backup.ts to copy the actual file this app reads/writes, resolved
+// the exact same way (relative to prisma/schema.prisma's directory, not cwd).
+export const resolvedDatabaseFilePath = databaseUrl.startsWith('file:') ? databaseUrl.slice('file:'.length) : null;
+
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
 export const prisma = globalForPrisma.prisma ?? new PrismaClient({ datasources: { db: { url: databaseUrl } } });
