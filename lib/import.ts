@@ -4,8 +4,13 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 
 /** Anything with the same model-delegate methods as PrismaClient — either the top-level client or an already-open interactive-transaction client. Every actual write in this module goes through this type, never opening its own nested `$transaction`, so the caller (see commitImportRow vs. commitImportRowInTransaction below) controls whether each row gets its own transaction or the whole batch shares one. */
 type ImportDbClient = Prisma.TransactionClient | PrismaClient;
+
+/** Duck-typed check for Prisma's "unique constraint violated" error (code P2002) — avoids importing the `Prisma` runtime value just for an `instanceof` check. */
+export const isUniqueConstraintError = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'P2002';
 import { formatDateOnly, isDateOnlyString, isDateTimeLocalString, isValidIanaTimeZone, parseDateOnly, parseZonedDateTime } from '@/lib/dates';
 import { deriveInitialStage, generateApplicationCode, generateNextAction, priorities, statuses, type ApplicationStatus } from '@/lib/recruiting';
+import { selectCurrentAssessment, selectCurrentInterview } from '@/lib/current-record';
 
 // --- Excel date parsing -----------------------------------------------------
 
@@ -167,6 +172,7 @@ export const detectHeaders = (rows: Array<Record<string, unknown>>): string[] =>
 // --- Column mapping ----------------------------------------------------------
 
 export const IMPORT_TARGET_FIELDS = [
+  'applicationCode',
   'company',
   'role',
   'applicationUrl',
@@ -183,8 +189,10 @@ export const IMPORT_TARGET_FIELDS = [
   'assessmentPlatform',
   'interviewScheduledStart',
   'interviewTimezone',
+  'offerDate',
   'offerDecisionDeadline',
   'offerCompensationSummary',
+  'offerNotes',
   'outcome',
   'nextAction',
   'nextActionDue',
@@ -212,8 +220,10 @@ export const CLEARABLE_IMPORT_FIELDS: readonly ImportTargetField[] = [
   'assessmentPlatform',
   'interviewScheduledStart',
   'interviewTimezone',
+  'offerDate',
   'offerDecisionDeadline',
   'offerCompensationSummary',
+  'offerNotes',
   'outcome',
   'nextAction',
   'nextActionDue',
@@ -223,6 +233,7 @@ export const CLEARABLE_IMPORT_FIELDS: readonly ImportTargetField[] = [
 // workbook's own header row. The user can always override any of these in
 // the preview UI before confirming — this is only a starting guess.
 export const IMPORT_FIELD_ALIASES: Record<ImportTargetField, string[]> = {
+  applicationCode: ['Application Code', 'applicationCode'],
   company: ['Company', 'company'],
   role: ['Role', 'role'],
   applicationUrl: ['URL', 'url', 'Application URL', 'applicationUrl'],
@@ -239,8 +250,10 @@ export const IMPORT_FIELD_ALIASES: Record<ImportTargetField, string[]> = {
   assessmentPlatform: ['OA Platform', 'Assessment Platform', 'assessmentPlatform'],
   interviewScheduledStart: ['Interview Scheduled Start', 'interviewScheduledStart'],
   interviewTimezone: ['Interview Timezone', 'interviewTimezone'],
+  offerDate: ['Offer Date', 'offerDate'],
   offerDecisionDeadline: ['Decision Deadline', 'offerDecisionDeadline'],
   offerCompensationSummary: ['Compensation', 'offerCompensationSummary'],
+  offerNotes: ['Offer Notes', 'offerNotes'],
   outcome: ['Outcome', 'Rejection Reason', 'outcome'],
   nextAction: ['Next Action', 'nextAction'],
   nextActionDue: ['Next Action Due', 'nextActionDue'],
@@ -296,30 +309,58 @@ export const STATUSES_REQUIRING_SUBMISSION_EVIDENCE: readonly ApplicationStatus[
 export const INTERVIEW_STAGES: readonly ApplicationStatus[] = ['Recruiter Screen', 'Technical Interview', 'Final Round'];
 export const TERMINAL_STATUSES: readonly ApplicationStatus[] = ['Rejected', 'Withdrawn', 'Closed', 'Accepted'];
 
+// Commit-time re-validation (see validateNormalizedImportRow) must be
+// AUTHORITATIVE, not just type-shaped — a client resending a "normalized"
+// row could tamper with any of these into a nonempty-but-malformed string
+// ("not-a-date", "2026-02-31", a bogus IANA zone). Reusing the exact same
+// validators lib/dates.ts uses everywhere else means a value that passes
+// here is guaranteed to parse identically downstream (parseDateOnly /
+// parseZonedDateTime), never silently resolving to null/"today" later.
+// .optional() (in addition to .nullable()) so a client that omits the key
+// entirely — an older commit payload predating a since-added field, e.g. —
+// is treated exactly like an explicit null, never a hard "Required" 400.
+// The transform collapses both to `null` so every downstream consumer still
+// only ever sees `string | null`, never `undefined`.
+const nullableRealDateOnly = (message: string) =>
+  z.string().nullable().optional().transform((value) => value ?? null).refine((value) => value === null || isDateOnlyString(value), message);
+const nullableRealDateTime = (message: string) =>
+  z.string().nullable().optional().transform((value) => value ?? null).refine((value) => value === null || isDateTimeLocalString(value), message);
+const nullableIanaTimeZone = (message: string) =>
+  z.string().nullable().optional().transform((value) => value ?? null).refine((value) => value === null || isValidIanaTimeZone(value), message);
+
 const importRowSchema = z.object({
+  applicationCode: z.string().trim().optional(),
   company: z.string().trim().min(1, 'Company is required'),
   role: z.string().trim().min(1, 'Role is required'),
   applicationUrl: z.string().trim().url('Application URL must be a valid URL'),
   priority: z.enum(priorities, { errorMap: () => ({ message: `Priority must be one of ${priorities.join(', ')}` }) }),
   status: z.enum(statuses, { errorMap: () => ({ message: `Status must be one of ${statuses.join(', ')}` }) }),
   location: z.string().trim().optional(),
-  applicationDeadline: z.string().nullable(),
-  dateFound: z.string().nullable(),
+  applicationDeadline: nullableRealDateOnly('Application Deadline must be a real calendar date (YYYY-MM-DD)'),
+  dateFound: nullableRealDateOnly('Date Found must be a real calendar date (YYYY-MM-DD)'),
   notes: z.string().optional(),
-  dateApplied: z.string().nullable(),
+  dateApplied: nullableRealDateOnly('Date Applied must be a real calendar date (YYYY-MM-DD)'),
   resumeVersionName: z.string().trim().optional(),
-  assessmentDueAt: z.string().nullable(),
-  assessmentTimezone: z.string().nullable(),
+  assessmentDueAt: nullableRealDateTime('OA Due At must be a real date and time'),
+  assessmentTimezone: nullableIanaTimeZone('OA Timezone must be a valid IANA timezone'),
   assessmentPlatform: z.string().trim().optional(),
-  interviewScheduledStart: z.string().nullable(),
-  interviewTimezone: z.string().nullable(),
-  offerDecisionDeadline: z.string().nullable(),
+  interviewScheduledStart: nullableRealDateTime('Interview Scheduled Start must be a real date and time'),
+  interviewTimezone: nullableIanaTimeZone('Interview Timezone must be a valid IANA timezone'),
+  offerDate: nullableRealDateOnly('Offer Date must be a real calendar date (YYYY-MM-DD)'),
+  offerDecisionDeadline: nullableRealDateOnly('Decision Deadline must be a real calendar date (YYYY-MM-DD)'),
   offerCompensationSummary: z.string().trim().optional(),
+  offerNotes: z.string().trim().optional(),
   outcome: z.string().trim().optional(),
   nextAction: z.string().trim().optional(),
   nextActionDue: z.string().nullable(),
   nextActionDueKind: z.enum(['date', 'timestamp']).nullable(),
-});
+}).refine((data) => {
+  // nextActionDue's shape must actually match its claimed kind — a tampered
+  // payload could otherwise pair a date-only value with kind 'timestamp'
+  // (or vice versa) and slip past the two independent nullable checks.
+  if (!data.nextActionDue) return true;
+  return data.nextActionDueKind === 'date' ? isDateOnlyString(data.nextActionDue) : isDateTimeLocalString(data.nextActionDue);
+}, { message: 'Next Action Due does not match its declared date/timestamp kind', path: ['nextActionDue'] });
 
 export type NormalizedImportRow = z.infer<typeof importRowSchema>;
 
@@ -343,16 +384,17 @@ export const validateNormalizedImportRow = (data: unknown): { ok: true; data: No
 };
 
 /** Hard, commit-blocking invariants that depend on more than one field together (so they can't be expressed as a single Zod field rule). Reused by both preview-time normalization and commit-time re-validation. */
+// Cross-field invariants the schema's per-field/object-level refinements
+// above can't express on their own (single-field format validity and the
+// nextActionDue/nextActionDueKind shape match ARE already enforced by the
+// schema itself, so they're deliberately not repeated here).
 function validateStatusInvariants(data: NormalizedImportRow): string[] {
   const errors: string[] = [];
   if (data.status === 'Offer' && !data.offerDecisionDeadline) {
     errors.push('Decision Deadline is required when Status is Offer');
   }
   if (data.assessmentDueAt && !data.assessmentTimezone) errors.push('OA Timezone is required when OA Due At is supplied');
-  if (data.assessmentTimezone && !isValidIanaTimeZone(data.assessmentTimezone)) errors.push('OA Timezone is not a recognized IANA timezone');
   if (data.interviewScheduledStart && !data.interviewTimezone) errors.push('Interview Timezone is required when Interview Scheduled Start is supplied');
-  if (data.interviewTimezone && !isValidIanaTimeZone(data.interviewTimezone)) errors.push('Interview Timezone is not a recognized IANA timezone');
-  if (data.nextActionDue && !data.nextActionDueKind) errors.push('Next Action Due is missing its date/timestamp kind');
   return errors;
 }
 
@@ -407,6 +449,7 @@ export const normalizeImportRow = (row: Record<string, unknown>, columnMap: Colu
   const applicationDeadline = parseMappedDateOnly('applicationDeadline', 'Application Deadline');
   const dateFound = parseMappedDateOnly('dateFound', 'Date Found');
   const dateApplied = parseMappedDateOnly('dateApplied', 'Date Applied');
+  const offerDate = parseMappedDateOnly('offerDate', 'Offer Date');
   const offerDecisionDeadline = parseMappedDateOnly('offerDecisionDeadline', 'Decision Deadline');
   const assessmentDueAt = parseMappedDateTime('assessmentDueAt', 'OA Due At');
   const interviewScheduledStart = parseMappedDateTime('interviewScheduledStart', 'Interview Scheduled Start');
@@ -493,14 +536,23 @@ export const normalizeImportRow = (row: Record<string, unknown>, columnMap: Colu
     status = 'Applied';
     warnings.push(`Interview Scheduled Start/Timezone not supplied — imported as Applied instead of ${downgradedFrom}; use Interview Received to add the interview manually.`);
   }
-  if (status === 'Accepted' && !offerDecisionDeadline) {
-    warnings.push('Imported as Accepted with no offer record — Decision Deadline was not supplied.');
+  const offerCompensationSummary = readMapped(row, columnMap, 'offerCompensationSummary') || undefined;
+  const offerNotes = readMapped(row, columnMap, 'offerNotes') || undefined;
+  // "Has offer data" for Accepted purposes means ANY offer-shaped field was
+  // supplied — Accepted (unlike Offer status itself) doesn't hard-require a
+  // decision deadline specifically, since by the time an offer is accepted
+  // the decision deadline is arguably moot; what matters is whether there's
+  // any offer information at all to attach.
+  const hasOfferData = Boolean(offerDate || offerDecisionDeadline || offerCompensationSummary || offerNotes);
+  if (status === 'Accepted' && !hasOfferData) {
+    warnings.push('Imported as Accepted with no offer record — no offer date, decision deadline, compensation, or notes were supplied.');
   }
   if (STATUSES_REQUIRING_SUBMISSION_EVIDENCE.includes(status) && !dateApplied) {
     warnings.push('No Date Applied supplied for a post-submission status — use Set Application Date to repair this record after import.');
   }
 
   const candidate = {
+    applicationCode: readMapped(row, columnMap, 'applicationCode') || undefined,
     company,
     role,
     applicationUrl,
@@ -517,8 +569,10 @@ export const normalizeImportRow = (row: Record<string, unknown>, columnMap: Colu
     assessmentPlatform: readMapped(row, columnMap, 'assessmentPlatform') || undefined,
     interviewScheduledStart,
     interviewTimezone,
+    offerDate,
     offerDecisionDeadline,
-    offerCompensationSummary: readMapped(row, columnMap, 'offerCompensationSummary') || undefined,
+    offerCompensationSummary,
+    offerNotes,
     outcome: readMapped(row, columnMap, 'outcome') || undefined,
     nextAction: readMapped(row, columnMap, 'nextAction') || undefined,
     nextActionDue,
@@ -573,6 +627,8 @@ export type PreviewRow = {
   suggestedAction: ImportRowDecision | 'error' | 'blank';
   /** Only populated when `duplicate?.source === 'database'` — what Update existing would actually change. */
   diff: ImportFieldDiff[] | null;
+  /** Only populated when `duplicate?.source === 'database'` — related-record (stage/next action/Assessment/Interview/Offer/outcome) effects Update existing would apply. */
+  effects: ImportRelatedRecordEffect[] | null;
   resumeMatch: ResumeVersionMatch;
 };
 
@@ -583,17 +639,53 @@ export type ExistingApplicationRecord = {
   applicationUrl: string | null;
   priority: string;
   status: string;
+  currentStage: string | null;
   location: string | null;
   applicationDeadline: Date | null;
   dateFound: Date | null;
   dateApplied: Date | null;
   notes: string | null;
   resumeVersionName: string | null;
+  nextAction: string | null;
+  nextActionDue: Date | null;
+  nextActionDueKind: string | null;
+  outcome: string | null;
+  /** The same deterministic "current" OA round used by export/update (see lib/current-record.ts) — null if this application has no OA assessment at all. */
+  currentAssessment: { dueAt: Date | null; timezone: string | null; platform: string | null } | null;
+  /** The current record for the application's CURRENT stage specifically — not just "any" interview (an application that has moved past Recruiter Screen still has that earlier interview on file, but it's not what an Update would touch). */
+  currentInterview: { stage: string; scheduledStart: Date | null; timezone: string | null } | null;
+  offer: { offerDate: Date | null; decisionDeadline: Date | null; compensationSummary: string | null; notes: string | null } | null;
 };
 
 const normalizeKey = (value: string | null | undefined) => (value ?? '').trim().toLowerCase();
 
 const displayValue = (value: string | null | undefined): string | null => (value ? value : null);
+
+export type DuplicateMatchCandidate = Pick<ExistingApplicationRecord, 'id' | 'company' | 'role' | 'applicationUrl'>;
+
+/**
+ * Shared duplicate-matching rule (same applicationUrl, OR same company+role,
+ * case/whitespace-insensitive) used both at preview time and re-checked at
+ * commit time — kept as one function so the two moments can never drift
+ * apart and silently disagree on what counts as a duplicate.
+ */
+export function findDuplicateApplication<T extends DuplicateMatchCandidate>(
+  company: string,
+  role: string,
+  applicationUrl: string,
+  existingApplications: T[],
+): T | null {
+  const normalizedCompany = normalizeKey(company);
+  const normalizedRole = normalizeKey(role);
+  const normalizedUrl = normalizeKey(applicationUrl);
+
+  const match = existingApplications.find((app) => {
+    const sameUrl = app.applicationUrl && normalizeKey(app.applicationUrl) === normalizedUrl;
+    const sameCompanyRole = normalizeKey(app.company) === normalizedCompany && normalizeKey(app.role) === normalizedRole;
+    return sameUrl || sameCompanyRole;
+  });
+  return match ?? null;
+}
 
 const FIELD_DISPLAY_ORDER: ImportTargetField[] = [
   'company', 'role', 'applicationUrl', 'priority', 'status', 'location',
@@ -664,6 +756,116 @@ export function computeImportRowDiff(existing: ExistingApplicationRecord, data: 
   });
 }
 
+export type ImportRelatedRecordEffectKind = 'create' | 'update' | 'retain' | 'change';
+
+export type ImportRelatedRecordEffect = {
+  record: 'stage' | 'nextAction' | 'assessment' | 'interview' | 'offer' | 'outcome';
+  kind: ImportRelatedRecordEffectKind;
+  description: string;
+};
+
+const nextActionDueDisplayValue = (due: Date | null, kind: string | null): string | null => {
+  if (!due) return null;
+  return kind === 'date' ? formatDateOnly(due) : due.toISOString();
+};
+
+/**
+ * Computes what an Update-existing decision would do to RELATED records —
+ * stage (derived from status, not a raw column), next action/due (also
+ * derived, not a straight copy of a mapped column), and the Assessment /
+ * Interview / Offer sub-records and outcome field. Kept separate from
+ * computeImportRowDiff (which only covers direct column-value changes on the
+ * Application row itself) because these are computed effects, not simple
+ * before/after field values — and this function's branches are deliberately
+ * kept in lockstep with updateImportedApplication's own branches below, so
+ * preview never promises an effect the actual commit wouldn't perform.
+ */
+export function computeImportRowEffects(existing: ExistingApplicationRecord, data: NormalizedImportRow, fieldPresence: FieldPresenceMap): ImportRelatedRecordEffect[] {
+  // Note: unlike updateImportedApplication's own `include`, a 'blank'
+  // clearable field here is treated as "would clear if confirmed" — preview
+  // runs before the user has confirmed any clears, so this shows the effect
+  // that WOULD apply if they confirm, which the wording below makes explicit.
+  const include = (field: ImportTargetField): boolean => {
+    const state = fieldPresence[field];
+    if (state === 'unmapped' || state === undefined) return false;
+    if (state === 'blank') return CLEARABLE_IMPORT_FIELDS.includes(field);
+    return true;
+  };
+  const pendingClear = (field: ImportTargetField): boolean => fieldPresence[field] === 'blank' && CLEARABLE_IMPORT_FIELDS.includes(field);
+
+  const effects: ImportRelatedRecordEffect[] = [];
+  const previousStatus = existing.status as ApplicationStatus;
+  const nextStatus = include('status') ? (data.status as ApplicationStatus) : previousStatus;
+  const statusChanged = nextStatus !== previousStatus;
+  const nextStage = statusChanged ? deriveInitialStage(nextStatus) : (existing.currentStage ?? deriveInitialStage(previousStatus));
+
+  if (statusChanged) {
+    effects.push({
+      record: 'stage',
+      kind: 'change',
+      description: `Stage will change from "${existing.currentStage ?? '(none)'}" to "${nextStage}" (status → ${nextStatus})`,
+    });
+  }
+
+  if (statusChanged || include('nextAction') || include('nextActionDue')) {
+    const derivation = deriveImportNextAction({ ...data, status: nextStatus }, nextStage);
+    const newDueDisplay = nextActionDueDisplayValue(derivation.nextActionDue, derivation.nextActionDueKind);
+    const previousDueDisplay = nextActionDueDisplayValue(existing.nextActionDue, existing.nextActionDueKind);
+    if (derivation.nextAction !== (existing.nextAction ?? '') || newDueDisplay !== previousDueDisplay) {
+      const previousLabel = `"${existing.nextAction ?? '(none)'}"${previousDueDisplay ? ` (due ${previousDueDisplay})` : ''}`;
+      const newLabel = `"${derivation.nextAction}"${newDueDisplay ? ` (due ${newDueDisplay})` : ''}`;
+      effects.push({ record: 'nextAction', kind: 'change', description: `Next action will change from ${previousLabel} to ${newLabel}` });
+    }
+  }
+
+  if (nextStatus === 'OA') {
+    const assessmentFieldsTouched = include('assessmentDueAt') || include('assessmentTimezone') || include('assessmentPlatform');
+    const clearNote = (pendingClear('assessmentDueAt') || pendingClear('assessmentTimezone') || pendingClear('assessmentPlatform')) ? ' (pending clear confirmation)' : '';
+    if (assessmentFieldsTouched || statusChanged) {
+      effects.push(existing.currentAssessment
+        ? { record: 'assessment', kind: 'update', description: `Existing OA assessment record will be updated${clearNote}.` }
+        : { record: 'assessment', kind: 'create', description: 'A new OA assessment record will be created.' });
+    } else {
+      effects.push({ record: 'assessment', kind: 'retain', description: 'Existing OA assessment record will be left unchanged.' });
+    }
+  }
+
+  if (INTERVIEW_STAGES.includes(nextStatus)) {
+    const interviewFieldsTouched = include('interviewScheduledStart') || include('interviewTimezone');
+    const clearNote = (pendingClear('interviewScheduledStart') || pendingClear('interviewTimezone')) ? ' (pending clear confirmation)' : '';
+    if (interviewFieldsTouched || statusChanged) {
+      effects.push(existing.currentInterview && existing.currentInterview.stage === nextStatus
+        ? { record: 'interview', kind: 'update', description: `Existing ${nextStatus} interview record will be updated${clearNote}.` }
+        : { record: 'interview', kind: 'create', description: `A new ${nextStatus} interview record will be created.` });
+    } else {
+      effects.push({ record: 'interview', kind: 'retain', description: 'Existing interview record for this stage will be left unchanged.' });
+    }
+  }
+
+  const offerFieldsTouched = include('offerDate') || include('offerDecisionDeadline') || include('offerCompensationSummary') || include('offerNotes');
+  const hasOfferData = Boolean(data.offerDate || data.offerDecisionDeadline || data.offerCompensationSummary || data.offerNotes);
+  const offerWillBeTouched = nextStatus === 'Offer' || (nextStatus === 'Accepted' && hasOfferData && (offerFieldsTouched || statusChanged));
+  if (offerWillBeTouched) {
+    const clearNote = (pendingClear('offerDate') || pendingClear('offerDecisionDeadline') || pendingClear('offerCompensationSummary') || pendingClear('offerNotes')) ? ' (pending clear confirmation)' : '';
+    effects.push(existing.offer
+      ? { record: 'offer', kind: 'update', description: `Existing offer record will be updated${clearNote}.` }
+      : { record: 'offer', kind: 'create', description: 'A new offer record will be created.' });
+  } else if (nextStatus === 'Accepted' && !hasOfferData && !existing.offer) {
+    effects.push({ record: 'offer', kind: 'retain', description: 'Accepted with no offer record — none will be created unless offer fields are supplied.' });
+  }
+
+  const outcomeWillApply = (statusChanged && TERMINAL_STATUSES.includes(nextStatus) && include('outcome'))
+    || (include('outcome') && TERMINAL_STATUSES.includes(previousStatus));
+  if (outcomeWillApply) {
+    const newOutcome = data.outcome ?? null;
+    if (newOutcome !== existing.outcome) {
+      effects.push({ record: 'outcome', kind: 'change', description: `Outcome will change from "${existing.outcome ?? '(none)'}" to "${newOutcome ?? '(none)'}"` });
+    }
+  }
+
+  return effects;
+}
+
 export function buildImportPreview(
   rows: Array<Record<string, unknown>>,
   columnMap: ColumnMap,
@@ -682,11 +884,11 @@ export function buildImportPreview(
     });
 
     if (outcome.ok === 'blank') {
-      results.push({ rowNumber, status: 'blank', data: null, fieldPresence: null, errors: [], warnings: [], downgradedFrom: null, duplicate: null, suggestedAction: 'blank', diff: null, resumeMatch: null });
+      results.push({ rowNumber, status: 'blank', data: null, fieldPresence: null, errors: [], warnings: [], downgradedFrom: null, duplicate: null, suggestedAction: 'blank', diff: null, effects: null, resumeMatch: null });
       return;
     }
     if (!outcome.ok) {
-      results.push({ rowNumber, status: 'invalid', data: null, fieldPresence: null, errors: outcome.errors, warnings: [], downgradedFrom: null, duplicate: null, suggestedAction: 'error', diff: null, resumeMatch: null });
+      results.push({ rowNumber, status: 'invalid', data: null, fieldPresence: null, errors: outcome.errors, warnings: [], downgradedFrom: null, duplicate: null, suggestedAction: 'error', diff: null, effects: null, resumeMatch: null });
       return;
     }
 
@@ -695,11 +897,7 @@ export function buildImportPreview(
     const url = normalizeKey(outcome.data.applicationUrl);
 
     let duplicate: ImportDuplicateInfo | null = null;
-    const dbMatch = existingApplications.find((app) => {
-      const sameUrl = app.applicationUrl && normalizeKey(app.applicationUrl) === url;
-      const sameCompanyRole = normalizeKey(app.company) === company && normalizeKey(app.role) === role;
-      return sameUrl || sameCompanyRole;
-    });
+    const dbMatch = findDuplicateApplication(outcome.data.company, outcome.data.role, outcome.data.applicationUrl, existingApplications);
     if (dbMatch) {
       const matchedOn = dbMatch.applicationUrl && normalizeKey(dbMatch.applicationUrl) === url ? 'applicationUrl' : 'company+role';
       duplicate = { source: 'database', applicationId: dbMatch.id, matchedOn };
@@ -731,6 +929,7 @@ export function buildImportPreview(
       duplicate,
       suggestedAction: duplicate ? 'skip' : 'create',
       diff: dbMatch ? computeImportRowDiff(dbMatch, outcome.data, outcome.fieldPresence) : null,
+      effects: dbMatch ? computeImportRowEffects(dbMatch, outcome.data, outcome.fieldPresence) : null,
       resumeMatch,
     });
   });
@@ -852,9 +1051,22 @@ async function writeImportRow(
     return { applicationId, action: 'update' };
   }
 
-  // action is 'create' or 'importAnyway' — both create a new row; the only
-  // difference is that 'importAnyway' was chosen deliberately despite a
-  // flagged duplicate, which the caller already resolved before getting here.
+  // action is 'create' or 'importAnyway' — both create a new row. 'create'
+  // re-checks for a duplicate against the CURRENT database (via this same
+  // `tx`, so it also sees earlier rows already written in this same batch
+  // transaction, not just what existed when preview ran) — a duplicate may
+  // have appeared since preview: another row in this batch, a concurrent
+  // change, or a stale/replayed preview. 'importAnyway' is the ONLY action
+  // that intentionally skips this check — the user already saw the
+  // duplicate flagged at preview time and chose to create anyway.
+  if (action === 'create') {
+    const currentApplications = await tx.application.findMany({ select: { id: true, company: true, role: true, applicationUrl: true } });
+    const duplicate = findDuplicateApplication(data.company, data.role, data.applicationUrl, currentApplications);
+    if (duplicate) {
+      throw new Error('A matching application now exists in the database (created after preview) — re-run the preview, choose Update existing, or explicitly choose Import anyway.');
+    }
+  }
+
   const applicationId = await createImportedApplication(tx, data, existingCodes, rowOptions);
   return { applicationId, action: 'create' };
 }
@@ -893,7 +1105,15 @@ export async function commitImportRowInTransaction(
 async function createImportedApplication(tx: ImportDbClient, data: NormalizedImportRow, existingCodes: string[], rowOptions: CommitRowOptions): Promise<string> {
   const status = data.status as ApplicationStatus;
   const currentStage = deriveInitialStage(status);
-  const applicationCode = generateApplicationCode(data.company, data.role, new Date(), existingCodes);
+  // Reusing a supplied Application Code (e.g. re-importing a previous
+  // export) keeps it as the stable cross-sheet key it was exported as —
+  // but only when it's actually free; a collision (including with a code
+  // this same batch already minted) falls back to generating a fresh one
+  // rather than violating the column's uniqueness constraint.
+  const suppliedCode = data.applicationCode && !existingCodes.some((code) => code.toUpperCase() === data.applicationCode!.toUpperCase())
+    ? data.applicationCode
+    : null;
+  let applicationCode = suppliedCode ?? generateApplicationCode(data.company, data.role, new Date(), existingCodes);
   const { nextAction, nextActionDue, nextActionDueKind } = deriveImportNextAction(data, currentStage);
   // Preserve an explicitly-supplied Date Applied regardless of status — even
   // a Rejected/Withdrawn/Closed row can genuinely have applied before being
@@ -911,27 +1131,37 @@ async function createImportedApplication(tx: ImportDbClient, data: NormalizedImp
       : null;
 
   {
-    const application = await tx.application.create({
-      data: {
-        applicationCode,
-        company: data.company,
-        role: data.role,
-        applicationUrl: data.applicationUrl,
-        priority: data.priority,
-        status,
-        currentStage,
-        location: data.location ?? null,
-        applicationDeadline: data.applicationDeadline ? parseDateOnly(data.applicationDeadline) : null,
-        dateFound: data.dateFound ? parseDateOnly(data.dateFound) : new Date(),
-        dateApplied,
-        notes: data.notes ?? '',
-        nextAction,
-        nextActionDue,
-        nextActionDueKind,
-        resumeVersionId,
-        outcome: TERMINAL_STATUSES.includes(status) ? data.outcome ?? null : null,
-      },
-    });
+    const baseApplicationData = {
+      company: data.company,
+      role: data.role,
+      applicationUrl: data.applicationUrl,
+      priority: data.priority,
+      status,
+      currentStage,
+      location: data.location ?? null,
+      applicationDeadline: data.applicationDeadline ? parseDateOnly(data.applicationDeadline) : null,
+      dateFound: data.dateFound ? parseDateOnly(data.dateFound) : new Date(),
+      dateApplied,
+      notes: data.notes ?? '',
+      nextAction,
+      nextActionDue,
+      nextActionDueKind,
+      resumeVersionId,
+      outcome: TERMINAL_STATUSES.includes(status) ? data.outcome ?? null : null,
+    };
+
+    let application;
+    try {
+      application = await tx.application.create({ data: { applicationCode, ...baseApplicationData } });
+    } catch (error) {
+      // A supplied Application Code can collide with a row that existed in
+      // the database but wasn't reflected in the caller's `existingCodes`
+      // (e.g. a stale snapshot) — rather than failing the whole row, retry
+      // once with a freshly generated code. Any other error still propagates.
+      if (!isUniqueConstraintError(error)) throw error;
+      applicationCode = generateApplicationCode(data.company, data.role, new Date(), existingCodes);
+      application = await tx.application.create({ data: { applicationCode, ...baseApplicationData } });
+    }
 
     if (status === 'OA') {
       await tx.assessment.create({
@@ -956,12 +1186,20 @@ async function createImportedApplication(tx: ImportDbClient, data: NormalizedImp
       });
     }
 
-    if (status === 'Offer') {
+    // An Offer record is created for status 'Offer' (decisionDeadline is
+    // guaranteed present — see validateStatusInvariants) and ALSO for
+    // 'Accepted' whenever any offer-shaped field was actually supplied
+    // (Accepted doesn't hard-require a decision deadline the way Offer
+    // does — see the hasOfferData check in normalizeImportRow).
+    const hasOfferData = Boolean(data.offerDate || data.offerDecisionDeadline || data.offerCompensationSummary || data.offerNotes);
+    if (status === 'Offer' || (status === 'Accepted' && hasOfferData)) {
       await tx.offer.create({
         data: {
           applicationId: application.id,
-          decisionDeadline: parseDateOnly(data.offerDecisionDeadline!),
+          offerDate: data.offerDate ? parseDateOnly(data.offerDate) : null,
+          decisionDeadline: data.offerDecisionDeadline ? parseDateOnly(data.offerDecisionDeadline) : null,
           compensationSummary: data.offerCompensationSummary ?? null,
+          notes: data.offerNotes ?? null,
         },
       });
     }
@@ -1080,7 +1318,11 @@ async function updateImportedApplication(
     // related record inconsistent with what the application now says.
     if (nextStatus === 'OA' && (include('assessmentDueAt') || include('assessmentTimezone') || include('assessmentPlatform') || statusChanged)) {
       const dueAt = data.assessmentDueAt && data.assessmentTimezone ? parseZonedDateTime(data.assessmentDueAt, data.assessmentTimezone) : null;
-      const existingAssessment = await tx.assessment.findFirst({ where: { applicationId, type: 'OA' }, orderBy: { id: 'desc' } });
+      // Same deterministic "current" definition as export (see
+      // lib/current-record.ts) — if there happen to be multiple OA rounds
+      // already, an update touches the one with the latest due date, not
+      // whichever the database happened to return first.
+      const existingAssessment = selectCurrentAssessment(await tx.assessment.findMany({ where: { applicationId, type: 'OA' } }));
       if (existingAssessment) {
         await tx.assessment.update({
           where: { id: existingAssessment.id },
@@ -1097,7 +1339,7 @@ async function updateImportedApplication(
 
     if (INTERVIEW_STAGES.includes(nextStatus) && (include('interviewScheduledStart') || include('interviewTimezone') || statusChanged)) {
       const scheduledStart = data.interviewScheduledStart && data.interviewTimezone ? parseZonedDateTime(data.interviewScheduledStart, data.interviewTimezone) : null;
-      const existingInterview = await tx.interview.findFirst({ where: { applicationId, stage: nextStatus }, orderBy: { id: 'desc' } });
+      const existingInterview = selectCurrentInterview(await tx.interview.findMany({ where: { applicationId, stage: nextStatus } }));
       if (existingInterview) {
         await tx.interview.update({
           where: { id: existingInterview.id },
@@ -1111,17 +1353,23 @@ async function updateImportedApplication(
       }
     }
 
-    if (nextStatus === 'Offer' && (include('offerDecisionDeadline') || include('offerCompensationSummary') || statusChanged)) {
+    const offerFieldsTouched = include('offerDate') || include('offerDecisionDeadline') || include('offerCompensationSummary') || include('offerNotes');
+    const hasOfferData = Boolean(data.offerDate || data.offerDecisionDeadline || data.offerCompensationSummary || data.offerNotes);
+    if (nextStatus === 'Offer' || (nextStatus === 'Accepted' && hasOfferData && (offerFieldsTouched || statusChanged))) {
       await tx.offer.upsert({
         where: { applicationId },
         create: {
           applicationId,
+          offerDate: data.offerDate ? parseDateOnly(data.offerDate) : null,
           decisionDeadline: data.offerDecisionDeadline ? parseDateOnly(data.offerDecisionDeadline) : null,
           compensationSummary: data.offerCompensationSummary ?? null,
+          notes: data.offerNotes ?? null,
         },
         update: {
+          offerDate: include('offerDate') ? (data.offerDate ? parseDateOnly(data.offerDate) : null) : undefined,
           decisionDeadline: include('offerDecisionDeadline') ? (data.offerDecisionDeadline ? parseDateOnly(data.offerDecisionDeadline) : null) : undefined,
           compensationSummary: include('offerCompensationSummary') ? data.offerCompensationSummary ?? null : undefined,
+          notes: include('offerNotes') ? data.offerNotes ?? null : undefined,
         },
       });
     }

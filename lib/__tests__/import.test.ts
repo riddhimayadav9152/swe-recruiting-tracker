@@ -3,6 +3,7 @@ import {
   autoDetectColumnMap,
   buildImportPreview,
   computeImportRowDiff,
+  computeImportRowEffects,
   detectHeaders,
   isTimeNumberFormat,
   normalizeImportRow,
@@ -228,6 +229,22 @@ describe('normalizeImportRow', () => {
     expect(outcome.warnings.some((message) => message.includes('Accepted with no offer record'))).toBe(true);
   });
 
+  it('does not warn when Accepted supplies any offer-shaped field, even without a decision deadline', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'Compensation']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Accepted', Compensation: '$200k' }, map);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok !== true) throw new Error('expected success');
+    expect(outcome.warnings.some((message) => message.includes('no offer record'))).toBe(false);
+  });
+
+  it('preserves a supplied Application Code as the imported record\'s own code', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Application Code']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', 'Application Code': 'ACME-SOFT-260101' }, map);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok !== true) throw new Error('expected success');
+    expect(outcome.data.applicationCode).toBe('ACME-SOFT-260101');
+  });
+
   it('warns (without blocking) when a post-submission status has no Date Applied', () => {
     const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status']);
     const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Applied' }, map);
@@ -342,8 +359,10 @@ describe('buildImportPreview', () => {
     ];
     const existing: ExistingApplicationRecord[] = [{
       id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply',
-      priority: 'P2', status: 'Not Applied', location: null, applicationDeadline: null, dateFound: null,
+      priority: 'P2', status: 'Not Applied', currentStage: 'Discovered', location: null, applicationDeadline: null, dateFound: null,
       dateApplied: null, notes: 'Old note', resumeVersionName: null,
+      nextAction: null, nextActionDue: null, nextActionDueKind: null, outcome: null,
+      currentAssessment: null, currentInterview: null, offer: null,
     }];
     const preview = buildImportPreview(rows, BASE_MAP, existing, []);
     expect(preview[0].diff).not.toBeNull();
@@ -368,8 +387,10 @@ describe('buildImportPreview', () => {
 describe('computeImportRowDiff', () => {
   const existing: ExistingApplicationRecord = {
     id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply',
-    priority: 'P1', status: 'Applied', location: 'NYC', applicationDeadline: null, dateFound: null,
+    priority: 'P1', status: 'Applied', currentStage: 'Application Submitted', location: 'NYC', applicationDeadline: null, dateFound: null,
     dateApplied: null, notes: 'Existing note', resumeVersionName: 'Old Resume',
+    nextAction: null, nextActionDue: null, nextActionDueKind: null, outcome: null,
+    currentAssessment: null, currentInterview: null, offer: null,
   };
 
   it('marks an unmapped field as preserved, unchanged regardless of the normalized default', () => {
@@ -414,5 +435,126 @@ describe('computeImportRowDiff', () => {
     if (outcome.ok !== true) throw new Error('expected success');
     const diff = computeImportRowDiff(existing, outcome.data, outcome.fieldPresence);
     expect(diff.find((d) => d.field === 'priority')).toMatchObject({ kind: 'unchanged' });
+  });
+});
+
+describe('computeImportRowEffects', () => {
+  const baseExisting: ExistingApplicationRecord = {
+    id: 'existing-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply',
+    priority: 'P1', status: 'Not Applied', currentStage: 'Discovered', location: null, applicationDeadline: null,
+    dateFound: null, dateApplied: null, notes: null, resumeVersionName: null,
+    nextAction: 'Review and apply', nextActionDue: null, nextActionDueKind: null, outcome: null,
+    currentAssessment: null, currentInterview: null, offer: null,
+  };
+
+  it('produces no effects when status is unchanged and no status-gated fields are mapped', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(baseExisting, outcome.data, outcome.fieldPresence);
+    expect(effects).toEqual([]);
+  });
+
+  it('reports a stage effect and a next-action effect when status changes', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'Date Applied']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Applied', 'Date Applied': '2026-01-05' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(baseExisting, outcome.data, outcome.fieldPresence);
+    const stageEffect = effects.find((e) => e.record === 'stage');
+    expect(stageEffect).toMatchObject({ kind: 'change' });
+    expect(stageEffect!.description).toMatch(/Discovered.*Application Submitted/);
+    expect(effects.find((e) => e.record === 'nextAction')).toMatchObject({ kind: 'change' });
+  });
+
+  it('reports an assessment "create" effect for a fresh OA row with no existing assessment', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'OA Due At', 'OA Timezone']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'OA', 'OA Due At': '2026-08-15T09:00', 'OA Timezone': 'America/New_York' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(baseExisting, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'assessment')).toMatchObject({ kind: 'create' });
+  });
+
+  it('reports an assessment "update" effect when an OA assessment already exists', () => {
+    const existingWithAssessment: ExistingApplicationRecord = {
+      ...baseExisting, status: 'OA', currentStage: 'Online Assessment',
+      currentAssessment: { dueAt: new Date('2026-06-01T13:00:00.000Z'), timezone: 'America/New_York', platform: 'HackerRank' },
+    };
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'OA Due At', 'OA Timezone']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'OA', 'OA Due At': '2026-08-15T09:00', 'OA Timezone': 'America/New_York' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(existingWithAssessment, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'assessment')).toMatchObject({ kind: 'update' });
+  });
+
+  it('reports an assessment "retain" effect when status is unchanged OA and no assessment fields are supplied', () => {
+    const existingWithAssessment: ExistingApplicationRecord = {
+      ...baseExisting, status: 'OA', currentStage: 'Online Assessment',
+      currentAssessment: { dueAt: new Date('2026-06-01T13:00:00.000Z'), timezone: 'America/New_York', platform: 'HackerRank' },
+    };
+    // Status is deliberately left UNMAPPED — an Update-existing row that
+    // only touches an unrelated field (Notes here) must leave an already-OA
+    // application's status and its assessment schedule alone. (Explicitly
+    // mapping "Status: OA" with no OA Due At/Timezone would instead trigger
+    // normalizeImportRow's own OA-without-schedule downgrade to Applied,
+    // which is not what this test is checking.)
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Notes']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Notes: 'Unrelated update' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(existingWithAssessment, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'assessment')).toMatchObject({ kind: 'retain' });
+  });
+
+  it('reports an offer "create" effect for a fresh Offer row', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'Decision Deadline']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Offer', 'Decision Deadline': '2026-09-01' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(baseExisting, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'offer')).toMatchObject({ kind: 'create' });
+  });
+
+  it('reports an offer "update" effect for an Offer row when an offer already exists', () => {
+    const existingWithOffer: ExistingApplicationRecord = {
+      ...baseExisting, status: 'Offer', currentStage: 'Offer Received',
+      offer: { offerDate: null, decisionDeadline: new Date('2026-08-01T00:00:00.000Z'), compensationSummary: '$180k', notes: null },
+    };
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'Decision Deadline']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Offer', 'Decision Deadline': '2026-09-01' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(existingWithOffer, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'offer')).toMatchObject({ kind: 'update' });
+  });
+
+  it('reports an offer "retain" effect for an Accepted row with no offer data and no existing offer', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Accepted' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(baseExisting, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'offer')).toMatchObject({ kind: 'retain' });
+  });
+
+  it('reports an offer "create" effect for an Accepted row when offer data IS supplied', () => {
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'Compensation']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Accepted', Compensation: '$190k' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(baseExisting, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'offer')).toMatchObject({ kind: 'create' });
+  });
+
+  it('reports an outcome change when a terminal-status row supplies a differing outcome', () => {
+    const existingRejected: ExistingApplicationRecord = { ...baseExisting, status: 'Rejected', currentStage: 'Rejected', outcome: 'No response after final round' };
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'Outcome']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Rejected', Outcome: 'Rejected after onsite' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(existingRejected, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'outcome')).toMatchObject({ kind: 'change' });
+  });
+
+  it('reports no outcome effect when a terminal-status row supplies the SAME outcome already on file', () => {
+    const existingRejected: ExistingApplicationRecord = { ...baseExisting, status: 'Rejected', currentStage: 'Rejected', outcome: 'No response after final round' };
+    const map = autoDetectColumnMap(['Company', 'Role', 'URL', 'Status', 'Outcome']);
+    const outcome = normalizeImportRow({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Rejected', Outcome: 'No response after final round' }, map);
+    if (outcome.ok !== true) throw new Error('expected success');
+    const effects = computeImportRowEffects(existingRejected, outcome.data, outcome.fieldPresence);
+    expect(effects.find((e) => e.record === 'outcome')).toBeUndefined();
   });
 });

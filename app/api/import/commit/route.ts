@@ -72,10 +72,11 @@ export async function POST(request: Request) {
 
   // A backup happens before ANY writes, every time, regardless of commit
   // mode — if it fails, the whole import is aborted rather than proceeding
-  // without a safety net.
-  let backup: { path: string; fileName: string };
+  // without a safety net. Only a bare, safe fileName is ever returned to
+  // the client — never the full server-side path (see lib/db-backup.ts).
+  let backup: { fileName: string };
   try {
-    backup = createDatabaseBackup();
+    backup = await createDatabaseBackup();
   } catch (error) {
     return NextResponse.json({ error: `Backup failed, import aborted: ${error instanceof Error ? error.message : 'unknown error'}` }, { status: 500 });
   }
@@ -97,6 +98,13 @@ export async function POST(request: Request) {
       if (!verification.ok) return { ok: false as const, errors: [verification.reason] };
     }
 
+    // Note: 'create' rows are re-checked for a duplicate against the CURRENT
+    // database inside commitImportRow/commitImportRowInTransaction itself
+    // (see lib/import.ts's writeImportRow) — that check runs against the
+    // SAME transaction used to write the row, so it also sees duplicates
+    // created earlier in this very batch, not just what existed when this
+    // function ran. 'importAnyway' is the only action that intentionally
+    // skips it.
     return { ok: true as const, data: validated.data };
   };
 

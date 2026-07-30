@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import type { PrismaClient } from '@prisma/client';
 import { formatDateOnly, formatInZone } from '@/lib/dates';
+import { selectCurrentAssessment, selectCurrentInterview } from '@/lib/current-record';
 
 const DATE_ONLY_PATTERN = 'yyyy-MM-dd';
 const DATETIME_PATTERN = "yyyy-MM-dd'T'HH:mm:ss";
@@ -66,8 +67,15 @@ export function buildExportWorkbook(data: ExportData): XLSX.WorkBook {
     // stays self-sufficient for re-import through the same column-mapped
     // pipeline that created it (see lib/import.ts), without requiring the
     // importer to stitch together multiple sheets.
-    const currentAssessment = app.status === 'OA' ? app.assessments[app.assessments.length - 1] : undefined;
-    const currentInterview = app.interviews.filter((interview) => interview.stage === app.status).slice(-1)[0];
+    // "Current" is resolved deterministically (see lib/current-record.ts —
+    // latest due/scheduled date, tie-broken by id) rather than depending on
+    // whatever order Prisma happened to return the relation array in, which
+    // is unspecified and not something to rely on for a candidate with
+    // multiple OA or interview rounds.
+    const currentAssessment = app.status === 'OA' ? selectCurrentAssessment(app.assessments) : null;
+    const currentInterview = app.status === 'Recruiter Screen' || app.status === 'Technical Interview' || app.status === 'Final Round'
+      ? selectCurrentInterview(app.interviews.filter((interview) => interview.stage === app.status))
+      : null;
 
     return {
       'Application Code': app.applicationCode,

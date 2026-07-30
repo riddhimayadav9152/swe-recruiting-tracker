@@ -46,9 +46,9 @@ afterAll(async () => {
 });
 
 const BASE_MAP = autoDetectColumnMap([
-  'Company', 'Role', 'URL', 'Priority', 'Status', 'Application Deadline', 'Date Found', 'Notes', 'Date Applied',
+  'Application Code', 'Company', 'Role', 'URL', 'Priority', 'Status', 'Application Deadline', 'Date Found', 'Notes', 'Date Applied',
   'Resume Version', 'OA Due At', 'OA Timezone', 'OA Platform',
-  'Interview Scheduled Start', 'Interview Timezone', 'Decision Deadline', 'Compensation', 'Outcome',
+  'Interview Scheduled Start', 'Interview Timezone', 'Offer Date', 'Decision Deadline', 'Compensation', 'Offer Notes', 'Outcome',
 ]);
 
 const normalize = (row: Record<string, unknown>, map: typeof BASE_MAP = BASE_MAP): { data: NormalizedImportRow; fieldPresence: FieldPresenceMap } => {
@@ -156,6 +156,61 @@ describe('commitImportRow — create', () => {
     const offer = await prisma.offer.findUniqueOrThrow({ where: { applicationId: application.id } });
     expect(offer.decisionDeadline?.toISOString().slice(0, 10)).toBe('2026-09-01');
     expect(offer.compensationSummary).toBe('$180k base');
+  });
+
+  it('creates an Offer record for an Accepted-status row when offer data is supplied, with no decision deadline required', async () => {
+    const { data, fieldPresence } = normalize({
+      Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Accepted',
+      'Offer Date': '2026-08-01', Compensation: '$210k total', 'Offer Notes': 'Verbal accept on call',
+    });
+    const outcome = await commitImportRow(prisma, 'create', data, [], null, fieldPresence);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error('expected success');
+
+    const offer = await prisma.offer.findUniqueOrThrow({ where: { applicationId: outcome.applicationId } });
+    expect(offer.offerDate?.toISOString().slice(0, 10)).toBe('2026-08-01');
+    expect(offer.decisionDeadline).toBeNull();
+    expect(offer.compensationSummary).toBe('$210k total');
+    expect(offer.notes).toBe('Verbal accept on call');
+  });
+
+  it('creates no Offer record for an Accepted-status row when no offer data is supplied', async () => {
+    const { data, fieldPresence } = normalize({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Accepted' });
+    const outcome = await commitImportRow(prisma, 'create', data, [], null, fieldPresence);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error('expected success');
+    const offer = await prisma.offer.findUnique({ where: { applicationId: outcome.applicationId } });
+    expect(offer).toBeNull();
+  });
+
+  it('reuses a supplied Application Code as the created row\'s own code', async () => {
+    const { data, fieldPresence } = normalize({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', 'Application Code': 'ACME-CUSTOM-CODE' });
+    const outcome = await commitImportRow(prisma, 'create', data, [], null, fieldPresence);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error('expected success');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: outcome.applicationId } });
+    expect(application.applicationCode).toBe('ACME-CUSTOM-CODE');
+  });
+
+  it('falls back to a generated code when the supplied Application Code collides with an existing one', async () => {
+    await prisma.application.create({ data: { applicationCode: 'DUPLICATE-CODE', company: 'Other Co', role: 'X', applicationUrl: 'https://other.example.com', status: 'Not Applied', currentStage: 'Discovered' } });
+    const { data, fieldPresence } = normalize({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', 'Application Code': 'DUPLICATE-CODE' });
+    const outcome = await commitImportRow(prisma, 'create', data, [], null, fieldPresence);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error('expected success');
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: outcome.applicationId } });
+    expect(application.applicationCode).not.toBe('DUPLICATE-CODE');
+  });
+
+  it('updates an Accepted row to add an Offer record when offer data is supplied on update', async () => {
+    const existing = await prisma.application.create({
+      data: { applicationCode: 'ACCEPT-1', company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', status: 'Accepted', currentStage: 'Accepted' },
+    });
+    const { data, fieldPresence } = normalize({ Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Accepted', Compensation: '$205k' });
+    const outcome = await commitImportRow(prisma, 'update', data, [], existing.id, fieldPresence);
+    expect(outcome.ok).toBe(true);
+    const offer = await prisma.offer.findUniqueOrThrow({ where: { applicationId: existing.id } });
+    expect(offer.compensationSummary).toBe('$205k');
   });
 
   it('clears the next-action-due for a terminal status regardless of any supplied Application Deadline', async () => {
@@ -359,6 +414,74 @@ describe('validateNormalizedImportRow (commit-time re-validation)', () => {
     });
     expect(result.ok).toBe(false);
   });
+
+  // --- Tampered-payload attacks: a client could send back a "normalized"
+  // row that was never actually produced by normalizeImportRow — every
+  // date/datetime/timezone field must be re-validated for real, not just
+  // type-checked as "some string or null".
+  const baseValidRow = {
+    company: 'Acme', role: 'SWE', applicationUrl: 'https://acme.com/apply', priority: 'P1', status: 'Not Applied',
+    applicationDeadline: null, dateFound: null, dateApplied: null, assessmentDueAt: null, assessmentTimezone: null,
+    interviewScheduledStart: null, interviewTimezone: null, offerDate: null, offerDecisionDeadline: null,
+    nextActionDue: null, nextActionDueKind: null,
+  };
+
+  it.each([
+    ['applicationDeadline', 'not-a-date'],
+    ['applicationDeadline', '2026-02-31'], // February has at most 29 days — this is not a real calendar date
+    ['dateFound', 'not-a-date'],
+    ['dateApplied', '2026-13-01'], // month 13 does not exist
+    ['offerDate', '2026-04-31'], // April has 30 days
+    ['offerDecisionDeadline', 'not-a-date'],
+  ])('rejects a tampered %s of %j as not a real calendar date', (field, value) => {
+    const result = validateNormalizedImportRow({ ...baseValidRow, [field]: value });
+    expect(result.ok).toBe(false);
+  });
+
+  it.each([
+    ['assessmentDueAt', 'assessmentTimezone', 'not-a-datetime'],
+    ['assessmentDueAt', 'assessmentTimezone', '2026-02-31T09:00'],
+    ['interviewScheduledStart', 'interviewTimezone', 'not-a-datetime'],
+    ['interviewScheduledStart', 'interviewTimezone', '2026-04-31T09:00'],
+  ])('rejects a tampered %s of %j as not a real date and time', (dateField, timezoneField, value) => {
+    const result = validateNormalizedImportRow({ ...baseValidRow, [dateField]: value, [timezoneField]: 'America/New_York' });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a tampered assessmentTimezone that is not a real IANA timezone', () => {
+    const result = validateNormalizedImportRow({ ...baseValidRow, assessmentDueAt: '2026-08-15T09:00', assessmentTimezone: 'Not/A_Zone' });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a tampered interviewTimezone that is not a real IANA timezone', () => {
+    const result = validateNormalizedImportRow({ ...baseValidRow, interviewScheduledStart: '2026-08-15T09:00', interviewTimezone: 'Definitely/Fake' });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a tampered nextActionDue of "not-a-date" claiming kind "date"', () => {
+    const result = validateNormalizedImportRow({ ...baseValidRow, nextActionDue: 'not-a-date', nextActionDueKind: 'date' });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a tampered nextActionDue of "2026-02-31" claiming kind "date"', () => {
+    const result = validateNormalizedImportRow({ ...baseValidRow, nextActionDue: '2026-02-31', nextActionDueKind: 'date' });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects a tampered nextActionDue of an invalid datetime claiming kind "timestamp"', () => {
+    const result = validateNormalizedImportRow({ ...baseValidRow, nextActionDue: 'not-a-datetime', nextActionDueKind: 'timestamp' });
+    expect(result.ok).toBe(false);
+  });
+
+  it('accepts real, well-formed dates/datetimes/timezones on all of the same fields (control case)', () => {
+    const result = validateNormalizedImportRow({
+      ...baseValidRow,
+      applicationDeadline: '2026-08-15', dateFound: '2026-01-01', dateApplied: '2026-01-02',
+      assessmentDueAt: '2026-08-15T09:00', assessmentTimezone: 'America/New_York',
+      nextActionDue: '2026-08-15', nextActionDueKind: 'date',
+    });
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe('full import batch behavior', () => {
@@ -416,9 +539,16 @@ describe('full import batch behavior', () => {
     expect(await prisma.application.count()).toBe(2);
 
     const existingApplications = await prisma.application.findMany({
-      select: { id: true, company: true, role: true, applicationUrl: true, priority: true, status: true, location: true, applicationDeadline: true, dateFound: true, dateApplied: true, notes: true, resumeVersion: { select: { name: true } } },
+      select: {
+        id: true, company: true, role: true, applicationUrl: true, priority: true, status: true, currentStage: true, location: true,
+        applicationDeadline: true, dateFound: true, dateApplied: true, notes: true, nextAction: true, nextActionDue: true, nextActionDueKind: true, outcome: true,
+        resumeVersion: { select: { name: true } },
+      },
     });
-    const withResumeName = existingApplications.map((app) => ({ ...app, resumeVersionName: app.resumeVersion?.name ?? null }));
+    const withResumeName = existingApplications.map((app) => ({
+      ...app, resumeVersionName: app.resumeVersion?.name ?? null,
+      currentAssessment: null, currentInterview: null, offer: null,
+    }));
     const preview = buildImportPreview(rows, BASE_MAP, withResumeName, []);
     expect(preview.every((row) => row.duplicate?.source === 'database')).toBe(true);
     expect(preview.every((row) => row.suggestedAction === 'skip')).toBe(true);
@@ -433,5 +563,65 @@ describe('full import batch behavior', () => {
       await commitImportRow(prisma, 'create', row.data, existingCodes, null, row.fieldPresence);
     }
     expect(await prisma.application.count()).toBe(2);
+  });
+
+  it('stale preview: a "create" is rejected once a matching application is created after preview but before confirmation', async () => {
+    const { data, fieldPresence } = normalize({ Company: 'Stale Preview Co', Role: 'Software Engineer', URL: 'https://stale-preview.example.com/apply' });
+
+    // Preview ran when no such application existed — the row was suggested
+    // as "create". Before commit actually runs, something else (another row
+    // in the same import, or a fully separate change) creates a matching
+    // application: same company+role and applicationUrl.
+    await prisma.application.create({
+      data: {
+        applicationCode: 'STALE-1', company: 'Stale Preview Co', role: 'Software Engineer',
+        applicationUrl: 'https://stale-preview.example.com/apply', status: 'Not Applied', currentStage: 'Discovered',
+      },
+    });
+    expect(await prisma.application.count()).toBe(1);
+
+    const outcome = await commitImportRow(prisma, 'create', data, [], null, fieldPresence);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error('expected the stale create to be rejected');
+    expect(outcome.errors.join(' ')).toMatch(/matching application now exists/);
+
+    // Rejected, not silently duplicated — still exactly the one row created directly above.
+    expect(await prisma.application.count()).toBe(1);
+  });
+
+  it('"importAnyway" is the one action that bypasses the create-time duplicate re-check, even for the same stale scenario', async () => {
+    const { data, fieldPresence } = normalize({ Company: 'Stale Preview Co 2', Role: 'Product Manager', URL: 'https://stale-preview-2.example.com/apply' });
+
+    await prisma.application.create({
+      data: {
+        applicationCode: 'STALE-2', company: 'Stale Preview Co 2', role: 'Product Manager',
+        applicationUrl: 'https://stale-preview-2.example.com/apply', status: 'Not Applied', currentStage: 'Discovered',
+      },
+    });
+
+    const outcome = await commitImportRow(prisma, 'importAnyway', data, [], null, fieldPresence);
+    expect(outcome.ok).toBe(true);
+
+    // The deliberate duplicate is now allowed to exist alongside the original.
+    expect(await prisma.application.count()).toBe(2);
+  });
+
+  it('entire-batch mode: the create-time duplicate re-check also catches a duplicate created earlier in the SAME batch transaction', async () => {
+    const rowA = normalize({ Company: 'Batch Dup Co', Role: 'Software Engineer', URL: 'https://batch-dup.example.com/apply' });
+    const rowB = normalize({ Company: 'Batch Dup Co', Role: 'Software Engineer', URL: 'https://batch-dup.example.com/apply' });
+    const existingCodes: string[] = [];
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        await commitImportRowInTransaction(tx, 'create', rowA.data, existingCodes, null, rowA.fieldPresence);
+        // Row B is a duplicate of row A, created moments earlier in this
+        // exact same transaction — the re-check must see it via `tx`, not
+        // just what was committed before the batch started.
+        await commitImportRowInTransaction(tx, 'create', rowB.data, existingCodes, null, rowB.fieldPresence);
+      }),
+    ).rejects.toThrow(/matching application now exists/);
+
+    // The whole batch rolled back, including row A's earlier create.
+    expect(await prisma.application.count()).toBe(0);
   });
 });

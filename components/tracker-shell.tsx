@@ -69,6 +69,7 @@ type ImportRowDecision = 'create' | 'update' | 'skip' | 'importAnyway';
 type ImportDuplicateInfo = { source: 'database' | 'workbook'; applicationId?: string; rowNumber?: number; matchedOn: string } | null;
 type ImportFieldDiff = { field: ImportTargetField; presence: 'supplied' | 'blank' | 'unmapped'; previousValue: string | null; newValue: string | null; kind: 'preserved' | 'unchanged' | 'changed' | 'clear' };
 type ImportResumeMatch = { id: string; name: string } | null;
+type ImportRelatedRecordEffect = { record: 'stage' | 'nextAction' | 'assessment' | 'interview' | 'offer' | 'outcome'; kind: 'create' | 'update' | 'retain' | 'change'; description: string };
 type ImportPreviewRow = {
   rowNumber: number;
   status: 'valid' | 'invalid' | 'blank';
@@ -79,6 +80,7 @@ type ImportPreviewRow = {
   duplicate: ImportDuplicateInfo;
   suggestedAction: ImportRowDecision | 'error' | 'blank';
   diff: ImportFieldDiff[] | null;
+  effects: ImportRelatedRecordEffect[] | null;
   resumeMatch: ImportResumeMatch;
 };
 type ImportPreviewResponse = {
@@ -199,7 +201,24 @@ export default function TrackerShell() {
   const [importCommitMode, setImportCommitMode] = useState<'per-row' | 'batch'>('per-row');
   const [importNextActionDueKindOverride, setImportNextActionDueKindOverride] = useState<'date' | 'timestamp' | ''>('');
   const [importLoading, setImportLoading] = useState(false);
-  const [importResult, setImportResult] = useState<{ created: number; updated: number; skipped: number; errors: Array<{ rowNumber: number; errors: string[] }>; mode: string; backup: { path: string; fileName: string } } | null>(null);
+  const [importResult, setImportResult] = useState<{ created: number; updated: number; skipped: number; errors: Array<{ rowNumber: number; errors: string[] }>; mode: string; backup: { fileName: string } } | null>(null);
+  const [restoreFileHandle, setRestoreFileHandle] = useState<File | null>(null);
+  const [restoreLoading, setRestoreLoading] = useState(false);
+  const [restoreResult, setRestoreResult] = useState<{
+    backup: { fileName: string };
+    applications: { created: number; updated: number };
+    assessments: { created: number };
+    interviews: { created: number };
+    offers: { created: number };
+    contacts: { created: number };
+    notes: { created: number };
+    activities: { created: number };
+    jobDescriptions: { created: number };
+    resumeVersions: { created: number; matched: number };
+    profile: { created: boolean; updated: boolean };
+    unmatchedApplicationCodes: Array<{ sheet: string; rowNumber: number; applicationCode: string }>;
+    errors: Array<{ sheet: string; rowNumber: number; message: string }>;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -521,6 +540,56 @@ export default function TrackerShell() {
     link.click();
     window.URL.revokeObjectURL(url);
     toast.success('Database backup downloaded');
+  };
+
+  // Restores a raw SQLite .db file (e.g. one downloaded via "Download SQLite
+  // backup" above, or a file recovered from data/backups/) — this REPLACES
+  // the entire live database, so it's confirmed explicitly before running.
+  const restoreDatabaseFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!window.confirm('This will REPLACE the entire current database with the uploaded file. A safety backup of the current database is taken first. Continue?')) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch('/api/backup', { method: 'POST', body: formData });
+    const data = await response.json();
+    if (!response.ok) {
+      toast.error(data.error ?? 'Restore failed');
+      return;
+    }
+    toast.success(`Database restored (safety backup: ${data.backup?.fileName ?? 'n/a'})`);
+    await loadData();
+  };
+
+  const handleRestoreFileSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    setRestoreResult(null);
+    setRestoreFileHandle(file ?? null);
+  };
+
+  // Restores a FULL export workbook (every sheet, keyed by Application Code)
+  // into the CURRENT database — additive/updating by Application Code, not
+  // a wholesale file replacement (see restoreDatabaseFile above for that).
+  const confirmMultiSheetRestore = async () => {
+    if (!restoreFileHandle) return;
+    setRestoreLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', restoreFileHandle);
+      const response = await fetch('/api/import/restore', { method: 'POST', body: formData });
+      const data = await response.json();
+      if (!response.ok) {
+        toast.error(data.error ?? 'Restore failed');
+        return;
+      }
+      setRestoreResult(data);
+      setRestoreFileHandle(null);
+      toast.success(`Restored: ${data.applications.created} applications created, ${data.applications.updated} updated (backup: ${data.backup?.fileName})`);
+      await loadData();
+    } finally {
+      setRestoreLoading(false);
+    }
   };
 
   const saveProfile = async (event: React.FormEvent) => {
@@ -913,6 +982,11 @@ export default function TrackerShell() {
                         <button onClick={exportWorkbook} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f]">Export Excel workbook</button>
                         <button onClick={backupDatabase} className="rounded-lg border border-[#ffc4d6] bg-white px-4 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1]">Download SQLite backup</button>
                       </div>
+                      <div className="mt-4 border-t border-[#ffcad4] pt-4">
+                        <label className="block text-sm font-medium text-slate-700" htmlFor="restore-db-file">Restore from raw backup file</label>
+                        <p className="mt-1 text-xs text-slate-500">Replaces the ENTIRE current database with an uploaded <code>.db</code> file (e.g. one from &ldquo;Download SQLite backup&rdquo; above, or from <code>data/backups/</code>). A safety backup of the current database is always taken first.</p>
+                        <input id="restore-db-file" type="file" accept=".db" onChange={restoreDatabaseFile} className="mt-2 block w-full text-sm" />
+                      </div>
                     </div>
                     <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
                       <h3 className="text-lg font-semibold">Import</h3>
@@ -924,6 +998,62 @@ export default function TrackerShell() {
                       <input id="import-file" type="file" accept=".xlsx,.xls" onChange={handleImportFileSelected} className="mt-2 block w-full text-sm" />
                       <p className="mt-3 text-sm text-slate-500">Upload a workbook to preview and map its rows before anything is imported.</p>
                     </div>
+                  </div>
+
+                  <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
+                    <h3 className="text-lg font-semibold">Restore full backup (all sheets)</h3>
+                    <p className="mt-2 text-sm text-slate-600">
+                      Restores EVERY sheet from a full &ldquo;Export Excel workbook&rdquo; file — Applications, Job Descriptions, Assessments, Interviews, Offers, Contacts, Notes, Activity History, Resume Versions, and Profile — matched by Application Code. This is atomic (one transaction, all-or-nothing) and additive/updating: an Application Code that already exists is updated, a new one is created. Use this to recover from a lost database or migrate to a fresh one, not for reviewing individual rows (use Import above for that).
+                    </p>
+                    <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="restore-workbook-file">Full export workbook file</label>
+                    <input id="restore-workbook-file" type="file" accept=".xlsx,.xls" onChange={handleRestoreFileSelected} className="mt-2 block w-full text-sm" />
+                    {restoreFileHandle && (
+                      <div className="mt-3 flex items-center gap-3">
+                        <span className="text-sm text-slate-600">{restoreFileHandle.name}</span>
+                        <button
+                          onClick={confirmMultiSheetRestore}
+                          disabled={restoreLoading}
+                          className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f] disabled:opacity-50"
+                        >
+                          {restoreLoading ? 'Restoring…' : 'Confirm Restore'}
+                        </button>
+                        <button onClick={() => setRestoreFileHandle(null)} className="rounded-lg border border-[#ffc4d6] bg-white px-4 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1]">Cancel</button>
+                      </div>
+                    )}
+                    {restoreResult && (
+                      <div className="mt-4 rounded-lg border border-[#ffcad4] bg-[#fadde1]/30 p-3 text-sm" data-testid="restore-result">
+                        <p className="text-xs text-slate-500">
+                          Database backed up to <code>{restoreResult.backup.fileName}</code> before any writes.
+                        </p>
+                        <p className="mt-2 text-slate-600">
+                          Applications: {restoreResult.applications.created} created, {restoreResult.applications.updated} updated
+                          {' • '}Assessments: {restoreResult.assessments.created}
+                          {' • '}Interviews: {restoreResult.interviews.created}
+                          {' • '}Offers: {restoreResult.offers.created}
+                          {' • '}Contacts: {restoreResult.contacts.created}
+                          {' • '}Notes: {restoreResult.notes.created}
+                          {' • '}Activities: {restoreResult.activities.created}
+                          {' • '}Job Descriptions: {restoreResult.jobDescriptions.created}
+                          {' • '}Resume Versions: {restoreResult.resumeVersions.created} created, {restoreResult.resumeVersions.matched} matched
+                        </p>
+                        {restoreResult.unmatchedApplicationCodes.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            <p className="font-medium text-amber-700">Unmatched Application Codes (row skipped):</p>
+                            {restoreResult.unmatchedApplicationCodes.map((u, index) => (
+                              <div key={index} className="text-xs text-amber-700">{u.sheet} row {u.rowNumber}: &ldquo;{u.applicationCode}&rdquo;</div>
+                            ))}
+                          </div>
+                        )}
+                        {restoreResult.errors.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            <p className="font-medium text-rose-700">Errors:</p>
+                            {restoreResult.errors.map((e, index) => (
+                              <div key={index} className="text-xs text-rose-700">{e.sheet} row {e.rowNumber}: {e.message}</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {importLoading && !importPreview && <div className="rounded-xl border border-[#ffcad4] bg-white p-6 text-sm text-slate-500 shadow-sm">Reading workbook…</div>}
@@ -1042,6 +1172,25 @@ export default function TrackerShell() {
                                     </table>
                                   )}
 
+                                  {action === 'update' && row.effects && row.effects.length > 0 && (
+                                    <div className="mt-2 space-y-1" data-testid="import-row-effects">
+                                      <p className="text-slate-500">Related records:</p>
+                                      {row.effects.map((effect, index) => (
+                                        <div
+                                          key={`${effect.record}-${index}`}
+                                          data-testid="import-row-effect"
+                                          className={
+                                            effect.kind === 'create' ? 'text-emerald-700'
+                                              : effect.kind === 'update' || effect.kind === 'change' ? 'text-sky-700'
+                                                : 'text-slate-400'
+                                          }
+                                        >
+                                          {effect.description}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+
                                   {resumeNameSupplied && !row.resumeMatch && (
                                     <div className="mt-2">
                                       <select
@@ -1120,11 +1269,18 @@ export default function TrackerShell() {
 
                   {importResult && (
                     <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
-                      <h3 className="text-lg font-semibold">Import result ({importResult.mode} mode)</h3>
+                      <h3 className="text-lg font-semibold">
+                        Import result ({importResult.mode === 'batch' ? 'entire batch — all-or-nothing' : 'per-row — independent transactions'})
+                      </h3>
                       {importResult.backup && (
-                        <p className="mt-1 text-xs text-slate-500" data-testid="import-backup-path">
-                          Database backed up to <code>{importResult.backup.fileName}</code> before any writes.
-                        </p>
+                        <div className="mt-1 rounded-lg border border-[#ffcad4] bg-[#fadde1]/30 p-2 text-xs text-slate-600" data-testid="import-backup-path">
+                          <p>
+                            Database backed up to <code>{importResult.backup.fileName}</code> (in <code>data/backups/</code>) before any writes.
+                          </p>
+                          <p className="mt-1">
+                            To restore: stop the app, copy <code>data/backups/{importResult.backup.fileName}</code> over <code>data/dev.db</code>, then restart. Or use the &ldquo;Restore from raw backup file&rdquo; control below.
+                          </p>
+                        </div>
                       )}
                       <p className="mt-2 text-sm text-slate-600">
                         {importResult.created} created • {importResult.updated} updated • {importResult.skipped} skipped

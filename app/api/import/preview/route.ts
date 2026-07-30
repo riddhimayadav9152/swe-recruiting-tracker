@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { selectCurrentAssessment, selectCurrentInterview } from '@/lib/current-record';
 import {
   autoDetectColumnMap,
   buildImportPreview,
@@ -8,6 +9,7 @@ import {
   parseWorkbookSheetNames,
   readWorkbookSheetRows,
   type ColumnMap,
+  type ExistingApplicationRecord,
   type ImportTargetField,
 } from '@/lib/import';
 
@@ -47,14 +49,27 @@ export async function POST(request: Request) {
   const [existingApplicationsRaw, existingResumeVersions] = await Promise.all([
     prisma.application.findMany({
       select: {
-        id: true, company: true, role: true, applicationUrl: true, priority: true, status: true, location: true,
-        applicationDeadline: true, dateFound: true, dateApplied: true, notes: true,
+        id: true, company: true, role: true, applicationUrl: true, priority: true, status: true, currentStage: true, location: true,
+        applicationDeadline: true, dateFound: true, dateApplied: true, notes: true, nextAction: true, nextActionDue: true, nextActionDueKind: true, outcome: true,
         resumeVersion: { select: { name: true } },
+        assessments: { where: { type: 'OA' }, select: { id: true, dueAt: true, timezone: true, platform: true } },
+        interviews: { select: { id: true, stage: true, scheduledStart: true, timezone: true } },
+        offers: { select: { offerDate: true, decisionDeadline: true, compensationSummary: true, notes: true } },
       },
     }),
     prisma.resumeVersion.findMany({ select: { id: true, name: true } }),
   ]);
-  const existingApplications = existingApplicationsRaw.map((app) => ({ ...app, resumeVersionName: app.resumeVersion?.name ?? null }));
+  const existingApplications: ExistingApplicationRecord[] = existingApplicationsRaw.map((app) => {
+    const currentAssessment = selectCurrentAssessment(app.assessments);
+    const currentInterview = selectCurrentInterview(app.interviews.filter((interview) => interview.stage === app.currentStage));
+    return {
+      ...app,
+      resumeVersionName: app.resumeVersion?.name ?? null,
+      currentAssessment: currentAssessment ? { dueAt: currentAssessment.dueAt, timezone: currentAssessment.timezone, platform: currentAssessment.platform } : null,
+      currentInterview: currentInterview ? { stage: currentInterview.stage, scheduledStart: currentInterview.scheduledStart, timezone: currentInterview.timezone } : null,
+      offer: app.offers ? { offerDate: app.offers.offerDate, decisionDeadline: app.offers.decisionDeadline, compensationSummary: app.offers.compensationSummary, notes: app.offers.notes } : null,
+    };
+  });
 
   const preview = buildImportPreview(rows, columnMap, existingApplications, existingResumeVersions, { cellFormats, nextActionDueKindOverride });
 

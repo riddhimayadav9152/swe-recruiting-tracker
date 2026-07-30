@@ -1,31 +1,28 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { prisma } from '@/lib/prisma';
+import { createDatabaseBackup, resolveBackupPath } from '@/lib/db-backup';
 
 const dataDir = path.resolve(process.cwd(), 'data');
 const dbPath = path.resolve(dataDir, 'dev.db');
-const backupDir = path.resolve(dataDir, 'backups');
-
-const ensureDirectories = () => {
-  fs.mkdirSync(dataDir, { recursive: true });
-  fs.mkdirSync(backupDir, { recursive: true });
-};
-
-const createBackup = () => {
-  if (!fs.existsSync(dbPath)) return null;
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupPath = path.resolve(backupDir, `dev-${stamp}.db`);
-  fs.copyFileSync(dbPath, backupPath);
-  return backupPath;
-};
 
 export async function GET() {
-  ensureDirectories();
   if (!fs.existsSync(dbPath)) {
     return NextResponse.json({ error: 'Database not found' }, { status: 404 });
   }
-  createBackup();
-  const buffer = fs.readFileSync(dbPath);
+
+  // VACUUM INTO — not a raw fs copy — so a download can never miss rows
+  // still sitting in the separate -wal file under Prisma's default WAL
+  // mode (see lib/db-backup.ts). The downloaded bytes are read back from
+  // that consistent snapshot, never from the live file directly.
+  let backup: { fileName: string };
+  try {
+    backup = await createDatabaseBackup(prisma);
+  } catch (error) {
+    return NextResponse.json({ error: `Backup failed: ${error instanceof Error ? error.message : 'unknown error'}` }, { status: 500 });
+  }
+  const buffer = fs.readFileSync(resolveBackupPath(backup.fileName));
   return new NextResponse(buffer, {
     status: 200,
     headers: {
@@ -40,8 +37,18 @@ export async function POST(request: Request) {
   const file = formData.get('file');
   if (!file || typeof file === 'string') return NextResponse.json({ error: 'File required' }, { status: 400 });
 
-  ensureDirectories();
-  const backupPath = createBackup();
+  let backup: { fileName: string };
+  try {
+    backup = await createDatabaseBackup(prisma);
+  } catch (error) {
+    return NextResponse.json({ error: `Backup failed, restore aborted: ${error instanceof Error ? error.message : 'unknown error'}` }, { status: 500 });
+  }
+
+  // The live connection must be closed before the underlying file is
+  // replaced out from under it — otherwise Prisma's open WAL-mode
+  // connection can reintroduce stale pages or corrupt the swapped-in file.
+  await prisma.$disconnect();
+
   const tempPath = path.resolve(dataDir, `dev.db.restore-${Date.now()}.tmp`);
   fs.writeFileSync(tempPath, Buffer.from(await file.arrayBuffer()));
   fs.renameSync(tempPath, dbPath);
@@ -51,5 +58,5 @@ export async function POST(request: Request) {
     if (fs.existsSync(companionPath)) fs.unlinkSync(companionPath);
   }
 
-  return NextResponse.json({ restored: true, backupPath: backupPath ? path.relative(process.cwd(), backupPath) : null });
+  return NextResponse.json({ restored: true, backup });
 }

@@ -1,36 +1,88 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { resolvedDatabaseFilePath } from '@/lib/prisma';
-
-export type DatabaseBackupResult = { path: string; fileName: string };
+import type { PrismaClient } from '@prisma/client';
+import { prisma as defaultPrisma } from '@/lib/prisma';
 
 /**
- * Copies the live SQLite database file to `data/backups/` with a timestamped
- * name, before any risky bulk write (an import commit). Throws if the
- * source database file can't be found or the copy fails — callers (see
+ * What the *browser* ever sees: a bare, safe filename with no directory
+ * component. The full server-side path (needed to actually locate/restore
+ * the file) is logged server-side only — see createDatabaseBackup below —
+ * never returned from an API response (see item 9: don't expose an
+ * absolute local filesystem path to the client).
+ */
+export type DatabaseBackupResult = { fileName: string };
+
+const BACKUP_DIR_NAME = 'backups';
+
+export const backupDirectory = (): string => path.join(path.resolve(process.cwd()), 'data', BACKUP_DIR_NAME);
+
+/** Resolves a safe backup fileName (as returned to the client) back to its full server-side path — used only by trusted server code (e.g. a future restore endpoint), never sent to the browser. */
+export const resolveBackupPath = (fileName: string): string => {
+  // Reject any path traversal attempt outright — this only ever accepts a
+  // bare filename this module itself generated.
+  if (fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
+    throw new Error('Invalid backup file name');
+  }
+  return path.join(backupDirectory(), fileName);
+};
+
+/** Queries SQLite's own PRAGMA database_list for the main database's actual file basename — the one generic way to know which file ANY given PrismaClient (default or a test-constructed one pointed elsewhere) is really backing. Falls back to 'db' if it can't be determined (e.g. an in-memory database with no file). */
+async function resolveSourceDbBaseName(client: PrismaClient): Promise<string> {
+  try {
+    const rows = await client.$queryRawUnsafe<Array<{ name: string; file: string }>>('PRAGMA database_list;');
+    const main = rows.find((row) => row.name === 'main');
+    if (main?.file) return path.basename(main.file);
+  } catch {
+    // Fall through to the generic default below.
+  }
+  return 'db';
+}
+
+/**
+ * Creates a timestamped, transactionally-consistent snapshot of the live
+ * SQLite database in `data/backups/`, before any risky bulk write (an
+ * import commit). Uses SQLite's own `VACUUM INTO` rather than copying the
+ * raw database file: a plain file copy can capture a torn/inconsistent
+ * state mid-write, and in WAL mode (the default for a Prisma-managed
+ * SQLite database) recently-committed data can still be sitting in the
+ * separate `-wal` file rather than the main one, so copying just the
+ * primary file can silently produce a backup that's missing committed
+ * rows. `VACUUM INTO` asks SQLite itself to write out a complete, compact,
+ * consistent copy of the database as it stands at that instant, regardless
+ * of WAL state — safe even against an actively-connected client.
+ *
+ * Throws if the backup can't be created — callers (see
  * app/api/import/commit/route.ts) treat that as fatal and abort the import
  * entirely rather than writing without a safety net.
  *
- * See docs/db-upgrades/next-action-due-kind.md for the same backup/restore
- * pattern already used by the nextActionDueKind backfill script.
+ * Returns only a bare, safe fileName — never the full filesystem path (see
+ * `DatabaseBackupResult`); the full path is logged server-side for
+ * operator/debugging use only.
  */
-export function createDatabaseBackup(): DatabaseBackupResult {
-  if (!resolvedDatabaseFilePath) {
-    throw new Error('DATABASE_URL is not a file: URL — cannot create a filesystem backup');
-  }
-  if (!fs.existsSync(resolvedDatabaseFilePath)) {
-    throw new Error(`Database file not found at ${resolvedDatabaseFilePath} — cannot back up before import`);
-  }
-
-  const repoRoot = path.resolve(process.cwd());
-  const backupDir = path.join(repoRoot, 'data', 'backups');
+export async function createDatabaseBackup(client: PrismaClient = defaultPrisma): Promise<DatabaseBackupResult> {
+  const backupDir = backupDirectory();
   fs.mkdirSync(backupDir, { recursive: true });
 
+  // Ask the connection itself which file it's actually backing (rather than
+  // assuming "dev.db") — this backup helper runs against whatever database
+  // the calling environment is actually pointed at (dev.db in production,
+  // a dedicated e2e-test.db under Playwright, an arbitrary test db in unit
+  // tests), and the filename should reflect that, not a hardcoded guess.
+  const sourceDbName = await resolveSourceDbBaseName(client);
+
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const fileName = `${path.basename(resolvedDatabaseFilePath)}.pre-import-${stamp}.bak`;
+  const fileName = `${sourceDbName}.pre-import-${stamp}.bak`;
   const backupPath = path.join(backupDir, fileName);
 
-  fs.copyFileSync(resolvedDatabaseFilePath, backupPath);
+  try {
+    await client.$executeRawUnsafe('VACUUM INTO ?', backupPath);
+  } catch (error) {
+    throw new Error(`Failed to create a consistent database backup: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
 
-  return { path: backupPath, fileName };
+  // Full path is intentionally only ever logged server-side — an operator
+  // restoring a backup by hand needs it; the browser never does.
+  console.log(`[import backup] created ${backupPath}`);
+
+  return { fileName };
 }
