@@ -587,7 +587,12 @@ export default function TrackerShell() {
       formData.append('mode', restoreMode);
       const response = await fetch('/api/import/restore', { method: 'POST', body: formData });
       const data = await response.json();
-      if (!response.ok) {
+      // A malformed request or server error (400/500) has no structured
+      // summary at all — just `{ error: string }`. A rejected-but-well-formed
+      // restore (422) still carries the full `{ ok: false, errors, ... }`
+      // summary, which IS rendered (see the restoreResult block below), so
+      // it must not be short-circuited here the same way.
+      if (typeof data.ok !== 'boolean') {
         toast.error(data.error ?? 'Restore failed');
         return;
       }
@@ -1024,21 +1029,21 @@ export default function TrackerShell() {
                         <input type="radio" name="restore-mode" className="mt-1" checked={restoreMode === 'empty'} onChange={() => setRestoreMode('empty')} />
                         <span>
                           <span className="font-medium">Restore into empty database</span>
-                          <span className="block text-xs text-slate-500">Refuses to run if the database already has any applications — the safest choice for a fresh recovery.</span>
+                          <span className="block text-xs text-slate-500">Refuses to run if the database already has ANY data at all — applications, resume versions, profile, or any child record — the safest choice for a fresh disaster recovery.</span>
                         </span>
                       </label>
                       <label className="mt-2 flex items-start gap-2 text-sm text-slate-700">
                         <input type="radio" name="restore-mode" className="mt-1" checked={restoreMode === 'replace'} onChange={() => setRestoreMode('replace')} />
                         <span>
                           <span className="font-medium">Replace matching applications (recommended)</span>
-                          <span className="block text-xs text-slate-500">For each Application Code already in the database, its Assessments/Interviews/Contacts/Notes/Activities are cleared and recreated from the workbook — restoring the same file twice produces the same result, not duplicates.</span>
+                          <span className="block text-xs text-slate-500">For each Application Code already in the database, its Assessments/Interviews/Contacts/Notes/Activities are cleared and recreated from the workbook, and its Job Description/Offer are removed if the workbook no longer has one — restoring the same file twice produces the exact same result, not duplicates or stale records. A child sheet may only reference an Application Code that&rsquo;s also in this workbook&rsquo;s own Applications sheet.</span>
                         </span>
                       </label>
                       <label className="mt-2 flex items-start gap-2 text-sm text-slate-700">
                         <input type="radio" name="restore-mode" className="mt-1" checked={restoreMode === 'merge'} onChange={() => setRestoreMode('merge')} />
                         <span>
                           <span className="font-medium">Merge without replacing history</span>
-                          <span className="block text-xs text-slate-500">Never deletes existing child records — the workbook&rsquo;s Assessments/Interviews/Contacts/Notes/Activities are always appended alongside whatever already exists. Restoring the same file twice WILL duplicate them; only use this to merge in history from another source.</span>
+                          <span className="block text-xs text-slate-500">Never deletes existing child records — the workbook&rsquo;s Assessments/Interviews/Contacts/Notes/Activities are always appended alongside whatever already exists. The ONLY mode where a child sheet row may reference an Application Code that isn&rsquo;t restated in this workbook&rsquo;s own Applications sheet (useful for merging in, say, just new Interviews for applications that already exist). Restoring the same file twice WILL duplicate one-to-many rows; only use this to merge in history from another source.</span>
                         </span>
                       </label>
                     </fieldset>

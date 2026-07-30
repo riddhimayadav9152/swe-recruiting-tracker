@@ -50,5 +50,9 @@ export async function POST(request: Request) {
   }
 
   const summary = await commitMultiSheetImport(prisma, parsed, mode);
-  return NextResponse.json({ ...summary, backup });
+  // 422 (Unprocessable Entity) — a well-formed request that failed
+  // validation, distinct from 400 (malformed request) and 200 (success) —
+  // the response body still carries the full structured sheet/row/message
+  // detail (and the backup filename) either way.
+  return NextResponse.json({ ...summary, backup }, { status: summary.ok ? 200 : 422 });
 }

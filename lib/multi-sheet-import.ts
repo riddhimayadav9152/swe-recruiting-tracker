@@ -3,8 +3,8 @@ import {
   isDateOnlyString, isDateTimeLocalString, isValidIanaTimeZone,
   parseDateOnly, parseTimestamp, parseZonedDateTime,
 } from '@/lib/dates';
-import { deriveInitialStage, generateApplicationCode, priorities, statuses, type ApplicationStatus, type Priority } from '@/lib/recruiting';
-import { isUniqueConstraintError, parseWorkbookSheetNames, readWorkbookSheetRows } from '@/lib/import';
+import { deriveInitialStage, priorities, statuses, type ApplicationStatus, type Priority } from '@/lib/recruiting';
+import { parseWorkbookSheetNames, readWorkbookSheetRows } from '@/lib/import';
 import { EXPORT_FORMAT_VERSION, METADATA_SHEET_NAME, REQUIRED_SHEET_NAMES } from '@/lib/export-format';
 
 // --- Full-workbook ("restore") multi-sheet import ---------------------------
@@ -157,24 +157,45 @@ const zeroedCounts = () => ({
  * Two strict phases, never interleaved:
  *  1. VALIDATE everything — workbook format/version, every required sheet's
  *     presence, every row's required fields and real-date/enum/URL shape,
- *     and every child-sheet Application Code reference — against zero
- *     writes. Any error, including a single unmatched Application Code,
- *     aborts the ENTIRE restore with nothing written.
+ *     every Applications row's Application Code (required, never generated
+ *     — that's the single-sheet importer's job, not this disaster-recovery
+ *     path; see createImportedApplication in lib/import.ts), no two
+ *     Applications rows sharing the same code, and every child-sheet
+ *     Application Code reference — against zero writes. Any error, including
+ *     a single unmatched Application Code, aborts the ENTIRE restore with
+ *     nothing written.
  *  2. Only if that whole pass comes back clean does a single transaction
  *     actually write anything, atomically.
  *
- * `mode` controls how a MATCHED existing application's one-to-many child
- * records (Assessments/Interviews/Contacts/Notes/Activities) are treated:
- *  - 'empty': the target database must have zero applications already
- *    (validated in phase 1); behaves like 'replace' once confirmed empty.
- *  - 'replace': deletes that application's existing one-to-many child rows
- *    before recreating them from the workbook — so restoring the SAME
- *    workbook twice produces the SAME final row counts (idempotent), rather
- *    than doubling every Assessment/Interview/Contact/Note/Activity.
- *  - 'merge': never deletes — appends the workbook's child rows alongside
- *    whatever already exists. Intentionally NOT idempotent for child
- *    tables; use this only to merge in additional history from another
- *    source, never to repeatedly re-apply the same export.
+ * `mode` controls both (a) which child-sheet Application Code references are
+ * considered valid, and (b) how a MATCHED existing application's child
+ * records are treated:
+ *  - 'empty': the target database must be genuinely empty already —
+ *    Applications, Resume Versions, Profile, and every child table
+ *    (validated in phase 1) — the safest choice for disaster recovery.
+ *    Behaves like 'replace' once confirmed empty. Only Application Codes
+ *    present in THIS workbook's own Applications sheet are valid child
+ *    references (there's nothing pre-existing to reference anyway).
+ *  - 'replace': only Application Codes present in THIS workbook's own
+ *    Applications sheet are valid child references — a code that exists
+ *    only in the current database (and isn't restated in this workbook) is
+ *    rejected, not silently accepted. For every matched application, its
+ *    existing one-to-many child rows (Assessments/Interviews/Contacts/
+ *    Notes/Activities) are deleted before recreating them from the
+ *    workbook, and its one-to-one JobDescription/Offer are deleted outright
+ *    when the workbook has no corresponding row for that code (rather than
+ *    left stale) — so restoring the SAME workbook twice produces the SAME
+ *    final rows and values everywhere (idempotent), never doubling or
+ *    leaving orphaned records behind.
+ *  - 'merge': the ONLY mode where a child Application Code may reference an
+ *    application that already exists in the database without being
+ *    restated in this workbook's own Applications sheet — this is what
+ *    makes "merge in a supplementary workbook of just new Interviews for
+ *    existing applications" possible. Never deletes anything — child rows
+ *    are always appended and one-to-one JobDescription/Offer rows are only
+ *    upserted, never removed. Intentionally NOT idempotent for one-to-many
+ *    child tables; use this only to merge in additional history from
+ *    another source, never to repeatedly re-apply the same export.
  */
 export async function commitMultiSheetImport(prisma: PrismaClient, parsed: ParsedMultiSheetWorkbook, mode: RestoreMode): Promise<MultiSheetImportSummary> {
   const { sheets: data, presentSheetNames } = parsed;
@@ -213,16 +234,47 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
     (await prisma.resumeVersion.findMany({ select: { name: true } })).map((r) => r.name.trim().toLowerCase()),
   );
 
-  if (mode === 'empty' && existingApplications.length > 0) {
-    errors.push({
-      sheet: 'Applications', rowNumber: 0,
-      message: `Restore mode is "Restore into empty database" but the database already has ${existingApplications.length} application(s). Choose Replace or Merge instead.`,
-    });
-    return { ok: false, mode, metadata, ...zeroedCounts(), unmatchedApplicationCodes, errors };
+  if (mode === 'empty') {
+    // A genuinely empty-database check, not just "no Applications" — Resume
+    // Versions and Profile are independent tables (not children of
+    // Application), and every child table is checked directly too rather
+    // than assumed empty-by-implication, so "empty" means what it says for
+    // a disaster-recovery restore.
+    const [resumeVersionCount, profileCount, assessmentCount, interviewCount, offerCount, contactCount, noteCount, activityCount, jobDescriptionCount] = await Promise.all([
+      prisma.resumeVersion.count(),
+      prisma.userProfile.count(),
+      prisma.assessment.count(),
+      prisma.interview.count(),
+      prisma.offer.count(),
+      prisma.contact.count(),
+      prisma.note.count(),
+      prisma.activity.count(),
+      prisma.jobDescription.count(),
+    ]);
+    const nonEmpty: string[] = [];
+    if (existingApplications.length > 0) nonEmpty.push(`${existingApplications.length} application(s)`);
+    if (resumeVersionCount > 0) nonEmpty.push(`${resumeVersionCount} resume version(s)`);
+    if (profileCount > 0) nonEmpty.push(`${profileCount} profile record(s)`);
+    if (assessmentCount > 0) nonEmpty.push(`${assessmentCount} assessment(s)`);
+    if (interviewCount > 0) nonEmpty.push(`${interviewCount} interview(s)`);
+    if (offerCount > 0) nonEmpty.push(`${offerCount} offer(s)`);
+    if (contactCount > 0) nonEmpty.push(`${contactCount} contact(s)`);
+    if (noteCount > 0) nonEmpty.push(`${noteCount} note(s)`);
+    if (activityCount > 0) nonEmpty.push(`${activityCount} activity record(s)`);
+    if (jobDescriptionCount > 0) nonEmpty.push(`${jobDescriptionCount} job description(s)`);
+
+    if (nonEmpty.length) {
+      errors.push({
+        sheet: 'Applications', rowNumber: 0,
+        message: `Restore mode is "Restore into empty database" but the database already has: ${nonEmpty.join(', ')}. Choose Replace or Merge instead.`,
+      });
+      return { ok: false, mode, metadata, ...zeroedCounts(), unmatchedApplicationCodes, errors };
+    }
   }
 
   // --- Phase 1c: validate every row, every sheet — no writes yet --------
   const workbookCodes = new Set<string>();
+  const codeRowNumbers = new Map<string, number[]>();
 
   data.resumeVersions.forEach((row, index) => {
     const rowNumber = index + 2;
@@ -234,6 +286,23 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
     const rowNumber = index + 2;
     if (!str(row['Company'])) errors.push({ sheet: 'Applications', rowNumber, message: 'Company is required' });
     if (!str(row['Role'])) errors.push({ sheet: 'Applications', rowNumber, message: 'Role is required' });
+
+    // Application Code is REQUIRED in this full-restore pathway — this app
+    // never generates a replacement code here (that's the single-sheet
+    // importer's job for manually curated workbooks, see
+    // createImportedApplication in lib/import.ts). A blank code makes it
+    // impossible to know whether a row is meant to update an existing
+    // application or create a new one, and impossible for child sheets to
+    // reference it — so it's rejected outright rather than guessed at.
+    const applicationCode = str(row['Application Code']);
+    if (!applicationCode) {
+      errors.push({ sheet: 'Applications', rowNumber, message: 'Application Code is required' });
+    } else {
+      workbookCodes.add(applicationCode);
+      const rows = codeRowNumbers.get(applicationCode) ?? [];
+      rows.push(rowNumber);
+      codeRowNumbers.set(applicationCode, rows);
+    }
 
     const status = str(row['Status']) ?? 'Not Applied';
     if (!(statuses as readonly string[]).includes(status)) errors.push({ sheet: 'Applications', rowNumber, message: `Status "${status}" is not a recognized status` });
@@ -263,12 +332,23 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
     if (resumeVersionName && !existingResumeNames.has(resumeVersionName.toLowerCase()) && !data.resumeVersions.some((r) => str(r['Name'])?.toLowerCase() === resumeVersionName.toLowerCase())) {
       errors.push({ sheet: 'Applications', rowNumber, message: `Resume Version "${resumeVersionName}" was not found in the Resume Versions sheet or the existing database` });
     }
-
-    const code = str(row['Application Code']);
-    if (code) workbookCodes.add(code);
   });
 
-  const codeExists = (code: string) => existingCodeToId.has(code) || workbookCodes.has(code);
+  // Two (or more) Applications rows sharing the same code would otherwise
+  // update the SAME application sequentially, silently discarding whichever
+  // row processed first — reported with every affected row number, and
+  // (like any other validation error) aborts the entire restore.
+  for (const [code, rowNumbers] of codeRowNumbers) {
+    if (rowNumbers.length > 1) {
+      errors.push({ sheet: 'Applications', rowNumber: rowNumbers[0], message: `Application Code "${code}" appears more than once (rows ${rowNumbers.join(', ')})` });
+    }
+  }
+
+  // Which existing-database-only Application Codes a child sheet may
+  // reference depends on mode — see this function's own docstring above.
+  // Only 'merge' may reference an application that isn't restated in this
+  // workbook's own Applications sheet.
+  const codeExists = (code: string): boolean => (mode === 'merge' ? existingCodeToId.has(code) || workbookCodes.has(code) : workbookCodes.has(code));
   const validateApplicationCodeRef = (sheet: string, rowNumber: number, row: Record<string, unknown>) => {
     const code = str(row['Application Code']);
     if (!code) { errors.push({ sheet, rowNumber, message: 'Application Code is required' }); return; }
@@ -361,16 +441,20 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
 
     // --- Applications ---------------------------------------------------
     const codeToId = new Map<string, string>(existingCodeToId);
-    const allCodes: string[] = [...existingCodeToId.keys()];
-    // Matched applications whose one-to-many child records must be cleared
-    // before recreating them from this workbook — only in replace/empty
-    // mode; 'merge' never deletes (see the docstring above).
-    const applicationsToClear = new Set<string>();
+    // Matched applications whose child records must be reconciled against
+    // this workbook before/after recreating them — only in replace/empty
+    // mode; 'merge' never deletes (see the docstring above). Keyed by CODE
+    // (not id) so the one-to-one JobDescription/Offer exactness check below
+    // can look up whether the workbook has a corresponding row for it.
+    const matchedCodesToClear = new Set<string>();
 
     for (const row of data.applications) {
       const company = str(row['Company'])!;
       const role = str(row['Role'])!;
-      const applicationCode = str(row['Application Code']);
+      // Guaranteed present and unique by phase 1 validation — this
+      // full-restore pathway never generates a replacement code (that's
+      // the single-sheet importer's job for manually curated workbooks).
+      const applicationCode = str(row['Application Code'])!;
       const status = (str(row['Status']) ?? 'Not Applied') as ApplicationStatus;
       const nextActionDueKind = str(row['Next Action Due Kind']) === 'date' ? 'date' : 'timestamp';
       const nextActionDueRaw = str(row['Next Action Due']);
@@ -405,41 +489,40 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
         updatedAt: parseTimestamp(row['Updated At']) ?? new Date(),
       };
 
-      const matchedId = applicationCode ? codeToId.get(applicationCode) : undefined;
+      const matchedId = codeToId.get(applicationCode);
       if (matchedId) {
         await tx.application.update({ where: { id: matchedId }, data: applicationData });
         summary.applications.updated += 1;
-        if (mode !== 'merge') applicationsToClear.add(matchedId);
+        if (mode !== 'merge') matchedCodesToClear.add(applicationCode);
         continue;
       }
 
-      const desiredCode = applicationCode && !allCodes.includes(applicationCode)
-        ? applicationCode
-        : generateApplicationCode(company, role, createdAt, allCodes);
-      let created;
-      try {
-        created = await tx.application.create({ data: { applicationCode: desiredCode, ...applicationData, createdAt } });
-      } catch (error) {
-        if (!isUniqueConstraintError(error)) throw error;
-        const fallbackCode = generateApplicationCode(company, role, createdAt, allCodes);
-        created = await tx.application.create({ data: { applicationCode: fallbackCode, ...applicationData, createdAt } });
-      }
-      allCodes.push(created.applicationCode);
-      codeToId.set(created.applicationCode, created.id);
-      if (applicationCode) codeToId.set(applicationCode, created.id);
+      const created = await tx.application.create({ data: { applicationCode, ...applicationData, createdAt } });
+      codeToId.set(applicationCode, created.id);
       summary.applications.created += 1;
     }
 
-    // Clear one-to-many child records for every matched application BEFORE
-    // recreating them below, so a repeated restore of the same workbook is
-    // idempotent (identical final row counts) instead of doubling every
-    // Assessment/Interview/Contact/Note/Activity each time it's re-run.
-    for (const applicationId of applicationsToClear) {
+    // Which codes actually have a Job Description / Offer row in this
+    // workbook — used just below to delete a matched application's stale
+    // one-to-one record when the workbook doesn't restate it, so replace
+    // mode is exact for these too, not just the one-to-many child tables.
+    const jdCodesInWorkbook = new Set(data.jobDescriptions.map((row) => str(row['Application Code'])).filter((code): code is string => code !== null));
+    const offerCodesInWorkbook = new Set(data.offers.map((row) => str(row['Application Code'])).filter((code): code is string => code !== null));
+
+    // Reconcile every matched application's child records BEFORE recreating
+    // them below, so a repeated restore of the same workbook is idempotent
+    // (identical final rows and values) instead of doubling every
+    // Assessment/Interview/Contact/Note/Activity, or leaving a stale
+    // JobDescription/Offer behind when the workbook no longer has one.
+    for (const code of matchedCodesToClear) {
+      const applicationId = codeToId.get(code)!;
       await tx.assessment.deleteMany({ where: { applicationId } });
       await tx.interview.deleteMany({ where: { applicationId } });
       await tx.contact.deleteMany({ where: { applicationId } });
       await tx.note.deleteMany({ where: { applicationId } });
       await tx.activity.deleteMany({ where: { applicationId } });
+      if (!jdCodesInWorkbook.has(code)) await tx.jobDescription.deleteMany({ where: { applicationId } });
+      if (!offerCodesInWorkbook.has(code)) await tx.offer.deleteMany({ where: { applicationId } });
     }
 
     const resolveApplicationId = (row: Record<string, unknown>): string => codeToId.get(str(row['Application Code'])!)!;
