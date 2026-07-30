@@ -203,8 +203,12 @@ export default function TrackerShell() {
   const [importLoading, setImportLoading] = useState(false);
   const [importResult, setImportResult] = useState<{ created: number; updated: number; skipped: number; errors: Array<{ rowNumber: number; errors: string[] }>; mode: string; backup: { fileName: string } } | null>(null);
   const [restoreFileHandle, setRestoreFileHandle] = useState<File | null>(null);
+  const [restoreMode, setRestoreMode] = useState<'empty' | 'replace' | 'merge'>('replace');
   const [restoreLoading, setRestoreLoading] = useState(false);
   const [restoreResult, setRestoreResult] = useState<{
+    ok: boolean;
+    mode: string;
+    metadata: { exportFormatVersion: number | null; applicationVersion: string | null; exportedAt: string | null };
     backup: { fileName: string };
     applications: { created: number; updated: number };
     assessments: { created: number };
@@ -571,12 +575,16 @@ export default function TrackerShell() {
   // Restores a FULL export workbook (every sheet, keyed by Application Code)
   // into the CURRENT database — additive/updating by Application Code, not
   // a wholesale file replacement (see restoreDatabaseFile above for that).
+  // Every row across every sheet is validated FIRST; if anything is wrong
+  // (bad workbook format/version, an invalid field, an unmatched Application
+  // Code reference) NOTHING is written — see lib/multi-sheet-import.ts.
   const confirmMultiSheetRestore = async () => {
     if (!restoreFileHandle) return;
     setRestoreLoading(true);
     try {
       const formData = new FormData();
       formData.append('file', restoreFileHandle);
+      formData.append('mode', restoreMode);
       const response = await fetch('/api/import/restore', { method: 'POST', body: formData });
       const data = await response.json();
       if (!response.ok) {
@@ -584,6 +592,10 @@ export default function TrackerShell() {
         return;
       }
       setRestoreResult(data);
+      if (!data.ok) {
+        toast.error(`Restore rejected — nothing was written (${data.errors.length + data.unmatchedApplicationCodes.length} issue(s) found).`);
+        return;
+      }
       setRestoreFileHandle(null);
       toast.success(`Restored: ${data.applications.created} applications created, ${data.applications.updated} updated (backup: ${data.backup?.fileName})`);
       await loadData();
@@ -1003,8 +1015,34 @@ export default function TrackerShell() {
                   <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
                     <h3 className="text-lg font-semibold">Restore full backup (all sheets)</h3>
                     <p className="mt-2 text-sm text-slate-600">
-                      Restores EVERY sheet from a full &ldquo;Export Excel workbook&rdquo; file — Applications, Job Descriptions, Assessments, Interviews, Offers, Contacts, Notes, Activity History, Resume Versions, and Profile — matched by Application Code. This is atomic (one transaction, all-or-nothing) and additive/updating: an Application Code that already exists is updated, a new one is created. Use this to recover from a lost database or migrate to a fresh one, not for reviewing individual rows (use Import above for that).
+                      Restores EVERY sheet from a full &ldquo;Export Excel workbook&rdquo; file — Applications, Job Descriptions, Assessments, Interviews, Offers, Contacts, Notes, Activity History, Resume Versions, and Profile — matched by Application Code. Every row across every sheet is validated FIRST; if anything is wrong (unrecognized workbook format/version, an invalid field, a reference to an Application Code that doesn&rsquo;t exist), NOTHING is written. Only once that whole check passes does it write everything in one all-or-nothing transaction. Use this to recover from a lost database or migrate to a fresh one, not for reviewing individual rows (use Import above for that).
                     </p>
+
+                    <fieldset className="mt-4 rounded-lg border border-[#ffcad4] p-3">
+                      <legend className="px-1 text-sm font-medium text-slate-700">Restore mode</legend>
+                      <label className="flex items-start gap-2 text-sm text-slate-700">
+                        <input type="radio" name="restore-mode" className="mt-1" checked={restoreMode === 'empty'} onChange={() => setRestoreMode('empty')} />
+                        <span>
+                          <span className="font-medium">Restore into empty database</span>
+                          <span className="block text-xs text-slate-500">Refuses to run if the database already has any applications — the safest choice for a fresh recovery.</span>
+                        </span>
+                      </label>
+                      <label className="mt-2 flex items-start gap-2 text-sm text-slate-700">
+                        <input type="radio" name="restore-mode" className="mt-1" checked={restoreMode === 'replace'} onChange={() => setRestoreMode('replace')} />
+                        <span>
+                          <span className="font-medium">Replace matching applications (recommended)</span>
+                          <span className="block text-xs text-slate-500">For each Application Code already in the database, its Assessments/Interviews/Contacts/Notes/Activities are cleared and recreated from the workbook — restoring the same file twice produces the same result, not duplicates.</span>
+                        </span>
+                      </label>
+                      <label className="mt-2 flex items-start gap-2 text-sm text-slate-700">
+                        <input type="radio" name="restore-mode" className="mt-1" checked={restoreMode === 'merge'} onChange={() => setRestoreMode('merge')} />
+                        <span>
+                          <span className="font-medium">Merge without replacing history</span>
+                          <span className="block text-xs text-slate-500">Never deletes existing child records — the workbook&rsquo;s Assessments/Interviews/Contacts/Notes/Activities are always appended alongside whatever already exists. Restoring the same file twice WILL duplicate them; only use this to merge in history from another source.</span>
+                        </span>
+                      </label>
+                    </fieldset>
+
                     <label className="mt-4 block text-sm font-medium text-slate-700" htmlFor="restore-workbook-file">Full export workbook file</label>
                     <input id="restore-workbook-file" type="file" accept=".xlsx,.xls" onChange={handleRestoreFileSelected} className="mt-2 block w-full text-sm" />
                     {restoreFileHandle && (
@@ -1021,24 +1059,32 @@ export default function TrackerShell() {
                       </div>
                     )}
                     {restoreResult && (
-                      <div className="mt-4 rounded-lg border border-[#ffcad4] bg-[#fadde1]/30 p-3 text-sm" data-testid="restore-result">
-                        <p className="text-xs text-slate-500">
-                          Database backed up to <code>{restoreResult.backup.fileName}</code> before any writes.
+                      <div
+                        className={`mt-4 rounded-lg border p-3 text-sm ${restoreResult.ok ? 'border-[#ffcad4] bg-[#fadde1]/30' : 'border-rose-200 bg-rose-50'}`}
+                        data-testid="restore-result"
+                      >
+                        <p className="font-semibold">
+                          {restoreResult.ok ? `Restored (${restoreResult.mode} mode)` : 'Restore rejected — nothing was written'}
                         </p>
-                        <p className="mt-2 text-slate-600">
-                          Applications: {restoreResult.applications.created} created, {restoreResult.applications.updated} updated
-                          {' • '}Assessments: {restoreResult.assessments.created}
-                          {' • '}Interviews: {restoreResult.interviews.created}
-                          {' • '}Offers: {restoreResult.offers.created}
-                          {' • '}Contacts: {restoreResult.contacts.created}
-                          {' • '}Notes: {restoreResult.notes.created}
-                          {' • '}Activities: {restoreResult.activities.created}
-                          {' • '}Job Descriptions: {restoreResult.jobDescriptions.created}
-                          {' • '}Resume Versions: {restoreResult.resumeVersions.created} created, {restoreResult.resumeVersions.matched} matched
+                        <p className="mt-1 text-xs text-slate-500">
+                          Database backed up to <code>{restoreResult.backup.fileName}</code> before this attempt (safe even though nothing else changed).
                         </p>
+                        {restoreResult.ok && (
+                          <p className="mt-2 text-slate-600">
+                            Applications: {restoreResult.applications.created} created, {restoreResult.applications.updated} updated
+                            {' • '}Assessments: {restoreResult.assessments.created}
+                            {' • '}Interviews: {restoreResult.interviews.created}
+                            {' • '}Offers: {restoreResult.offers.created}
+                            {' • '}Contacts: {restoreResult.contacts.created}
+                            {' • '}Notes: {restoreResult.notes.created}
+                            {' • '}Activities: {restoreResult.activities.created}
+                            {' • '}Job Descriptions: {restoreResult.jobDescriptions.created}
+                            {' • '}Resume Versions: {restoreResult.resumeVersions.created} created, {restoreResult.resumeVersions.matched} matched
+                          </p>
+                        )}
                         {restoreResult.unmatchedApplicationCodes.length > 0 && (
                           <div className="mt-2 space-y-1">
-                            <p className="font-medium text-amber-700">Unmatched Application Codes (row skipped):</p>
+                            <p className="font-medium text-amber-700">Unmatched Application Codes:</p>
                             {restoreResult.unmatchedApplicationCodes.map((u, index) => (
                               <div key={index} className="text-xs text-amber-700">{u.sheet} row {u.rowNumber}: &ldquo;{u.applicationCode}&rdquo;</div>
                             ))}

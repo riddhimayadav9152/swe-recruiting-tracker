@@ -2,6 +2,7 @@ import * as XLSX from 'xlsx';
 import type { PrismaClient } from '@prisma/client';
 import { formatDateOnly, formatInZone } from '@/lib/dates';
 import { selectCurrentAssessment, selectCurrentInterview } from '@/lib/current-record';
+import { APPLICATION_VERSION, EXPORT_FORMAT_VERSION, METADATA_SHEET_NAME, REQUIRED_SHEET_NAMES } from '@/lib/export-format';
 
 const DATE_ONLY_PATTERN = 'yyyy-MM-dd';
 const DATETIME_PATTERN = "yyyy-MM-dd'T'HH:mm:ss";
@@ -59,6 +60,17 @@ export async function loadExportData(prisma: PrismaClient) {
  */
 export function buildExportWorkbook(data: ExportData): XLSX.WorkBook {
   const workbook = XLSX.utils.book_new();
+
+  // Written first so a restore can validate the workbook's own format
+  // version and required-sheet list BEFORE trying to interpret anything
+  // else in it — see lib/multi-sheet-import.ts.
+  const metadataRows = [{
+    'Export Format Version': EXPORT_FORMAT_VERSION,
+    'Application Version': APPLICATION_VERSION,
+    'Export Timestamp': new Date().toISOString(),
+    'Required Sheets': REQUIRED_SHEET_NAMES.join(', '),
+  }];
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(metadataRows), METADATA_SHEET_NAME);
 
   const applicationRows = data.applications.map((app) => {
     // The Applications sheet also carries a denormalized "current" OA /

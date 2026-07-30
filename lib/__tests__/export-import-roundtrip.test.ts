@@ -121,20 +121,21 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     // --- Parse the buffer back into per-sheet rows, exactly as the restore ---
     // --- endpoint would upon receiving an uploaded file. ---
     const parsed = parseMultiSheetWorkbook(buffer);
-    expect(parsed.applications).toHaveLength(4);
-    expect(parsed.assessments).toHaveLength(2);
-    expect(parsed.interviews).toHaveLength(3);
-    expect(parsed.offers).toHaveLength(1);
-    expect(parsed.contacts).toHaveLength(2);
-    expect(parsed.notes).toHaveLength(2);
-    expect(parsed.activities).toHaveLength(2);
-    expect(parsed.jobDescriptions).toHaveLength(1);
-    expect(parsed.resumeVersions).toHaveLength(2);
-    expect(parsed.profile).toHaveLength(1);
+    expect(parsed.sheets.applications).toHaveLength(4);
+    expect(parsed.sheets.assessments).toHaveLength(2);
+    expect(parsed.sheets.interviews).toHaveLength(3);
+    expect(parsed.sheets.offers).toHaveLength(1);
+    expect(parsed.sheets.contacts).toHaveLength(2);
+    expect(parsed.sheets.notes).toHaveLength(2);
+    expect(parsed.sheets.activities).toHaveLength(2);
+    expect(parsed.sheets.jobDescriptions).toHaveLength(1);
+    expect(parsed.sheets.resumeVersions).toHaveLength(2);
+    expect(parsed.sheets.profile).toHaveLength(1);
 
     // --- Commit the ENTIRE restore into a CLEAN second database. ---
-    const summary = await commitMultiSheetImport(target.prisma, parsed);
+    const summary = await commitMultiSheetImport(target.prisma, parsed, 'empty');
 
+    expect(summary.ok).toBe(true);
     expect(summary.errors).toEqual([]);
     expect(summary.unmatchedApplicationCodes).toEqual([]);
     expect(summary.applications).toEqual({ created: 4, updated: 0 });
@@ -255,54 +256,68 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     expect(rtRejected.nextActionDue).toBeNull();
   });
 
-  it('re-running the restore against the SAME (now-populated) database updates existing applications by Application Code instead of duplicating them', async () => {
+  it('"replace" mode: re-running the restore against the SAME (now-populated) database updates matched applications AND leaves every model\'s row counts IDENTICAL — no duplicate assessments/interviews/contacts/notes/activities', async () => {
     const before = await target.prisma.application.count();
     expect(before).toBe(4); // from the previous test in this file
+
+    const beforeCounts = {
+      assessments: await target.prisma.assessment.count(),
+      interviews: await target.prisma.interview.count(),
+      contacts: await target.prisma.contact.count(),
+      notes: await target.prisma.note.count(),
+      activities: await target.prisma.activity.count(),
+      offers: await target.prisma.offer.count(),
+      resumeVersions: await target.prisma.resumeVersion.count(),
+    };
 
     const exportData = await loadExportData(source.prisma);
     const workbook = buildExportWorkbook(exportData);
     const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
     const parsed = parseMultiSheetWorkbook(buffer);
 
-    const summary = await commitMultiSheetImport(target.prisma, parsed);
+    const summary = await commitMultiSheetImport(target.prisma, parsed, 'replace');
+    expect(summary.ok).toBe(true);
     expect(summary.applications).toEqual({ created: 0, updated: 4 });
     expect(summary.errors).toEqual([]);
     expect(summary.unmatchedApplicationCodes).toEqual([]);
 
-    // No duplicate applications, assessments, or interviews were created —
-    // update matched every row by Application Code instead of re-creating it.
+    // Every model's row count is IDENTICAL to before this second restore —
+    // "replace" mode clears each matched application's one-to-many child
+    // records before recreating them from the workbook, so re-running the
+    // exact same restore is idempotent rather than doubling every row.
     expect(await target.prisma.application.count()).toBe(4);
+    expect(await target.prisma.assessment.count()).toBe(beforeCounts.assessments);
+    expect(await target.prisma.interview.count()).toBe(beforeCounts.interviews);
+    expect(await target.prisma.contact.count()).toBe(beforeCounts.contacts);
+    expect(await target.prisma.note.count()).toBe(beforeCounts.notes);
+    expect(await target.prisma.activity.count()).toBe(beforeCounts.activities);
+    expect(await target.prisma.offer.count()).toBe(beforeCounts.offers);
+    expect(await target.prisma.resumeVersion.count()).toBe(beforeCounts.resumeVersions);
+
     const rtMulti = await target.prisma.application.findFirstOrThrow({ where: { applicationCode: 'RT-MULTI' }, include: { assessments: true, interviews: true } });
-    // Assessments/Interviews are always appended (full-history sheets), so a
-    // second restore of the same workbook DOES add a second copy of each —
-    // this documents that behavior rather than silently under-testing it.
-    expect(rtMulti.assessments.length).toBeGreaterThanOrEqual(2);
-    expect(rtMulti.interviews.length).toBeGreaterThanOrEqual(3);
+    expect(rtMulti.assessments).toHaveLength(2);
+    expect(rtMulti.interviews).toHaveLength(3);
   });
 
-  it('reports an unmatched Application Code instead of silently dropping or crashing on an orphaned child-sheet row', async () => {
+  it('reports an unmatched Application Code and aborts the ENTIRE restore, writing nothing at all, instead of silently dropping the one row', async () => {
     const clean = makeTestDb('roundtrip-orphan-test.db');
     fs.mkdirSync(path.dirname(clean.dbPath), { recursive: true });
     if (fs.existsSync(clean.dbPath)) fs.unlinkSync(clean.dbPath);
     pushSchema(clean.databaseUrl);
 
     try {
-      const parsed = {
-        applications: [],
-        jobDescriptions: [],
-        assessments: [{ 'Application Code': 'DOES-NOT-EXIST', Type: 'OA', Platform: 'Coderbyte' }],
-        interviews: [],
-        offers: [],
-        contacts: [],
-        notes: [],
-        activities: [],
-        resumeVersions: [],
-        profile: [],
-      };
-      const summary = await commitMultiSheetImport(clean.prisma, parsed);
+      const exportData = await loadExportData(clean.prisma);
+      const workbook = buildExportWorkbook(exportData);
+      const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      const parsed = parseMultiSheetWorkbook(buffer);
+      parsed.sheets.assessments = [{ 'Application Code': 'DOES-NOT-EXIST', Type: 'OA', Platform: 'Coderbyte' }];
+
+      const summary = await commitMultiSheetImport(clean.prisma, parsed, 'empty');
+      expect(summary.ok).toBe(false);
       expect(summary.unmatchedApplicationCodes).toEqual([{ sheet: 'Assessments', rowNumber: 2, applicationCode: 'DOES-NOT-EXIST' }]);
       expect(summary.assessments).toEqual({ created: 0 });
       expect(await clean.prisma.assessment.count()).toBe(0);
+      expect(await clean.prisma.application.count()).toBe(0);
     } finally {
       await clean.prisma.$disconnect();
     }

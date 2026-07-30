@@ -3,6 +3,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
+import { EXPORT_FORMAT_VERSION, METADATA_SHEET_NAME, REQUIRED_SHEET_NAMES } from '../export-format';
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const testDbPath = path.join(projectRoot, 'data', 'import-restore-route-test.db');
@@ -18,6 +19,7 @@ function pushSchema(databaseUrl: string) {
 function buildRestoreWorkbookBuffer(): Buffer {
   const workbook = XLSX.utils.book_new();
   const sheets: Record<string, Array<Record<string, unknown>>> = {
+    [METADATA_SHEET_NAME]: [{ 'Export Format Version': EXPORT_FORMAT_VERSION, 'Application Version': '0.1.0', 'Export Timestamp': new Date().toISOString(), 'Required Sheets': REQUIRED_SHEET_NAMES.join(', ') }],
     Applications: [{ 'Application Code': 'ROUTE-1', Company: 'Route Co', Role: 'Software Engineer', Status: 'Not Applied' }],
     'Job Descriptions': [], Assessments: [], Interviews: [], Offers: [], Contacts: [], Notes: [], 'Activity History': [], 'Resume Versions': [], Profile: [],
   };
@@ -60,17 +62,19 @@ describe('POST /api/import/restore', () => {
     const buffer = buildRestoreWorkbookBuffer();
     const formData = new FormData();
     formData.set('file', new Blob([new Uint8Array(buffer)]), 'restore.xlsx');
+    formData.set('mode', 'empty');
     const request = new Request('http://localhost/api/import/restore', { method: 'POST', body: formData });
 
     const response = await POST(request);
     const body = await response.json();
 
+    expect(body.ok).toBe(true);
     expect(body.backup).toEqual({ fileName: expect.any(String) });
     expect((body.backup as { path?: string }).path).toBeUndefined();
     expect(body.backup.fileName).not.toContain('/');
     expect(body.applications).toEqual({ created: 1, updated: 0 });
     expect(body.errors).toEqual([]);
-    expect(body.mode).toBe('atomic-batch');
+    expect(body.mode).toBe('empty');
 
     const { prisma } = await import('../prisma');
     const app = await prisma.application.findUniqueOrThrow({ where: { applicationCode: 'ROUTE-1' } });
@@ -86,6 +90,22 @@ describe('POST /api/import/restore', () => {
 
     const { POST } = await import('../../app/api/import/restore/route');
     const request = new Request('http://localhost/api/import/restore', { method: 'POST', body: new FormData() });
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+  });
+
+  it('rejects a request with a missing or invalid mode', async () => {
+    const databaseUrl = `file:${testDbPath}`;
+    pushSchema(databaseUrl);
+    process.env.DATABASE_URL = databaseUrl;
+    vi.resetModules();
+
+    const { POST } = await import('../../app/api/import/restore/route');
+    const buffer = buildRestoreWorkbookBuffer();
+    const formData = new FormData();
+    formData.set('file', new Blob([new Uint8Array(buffer)]), 'restore.xlsx');
+    formData.set('mode', 'delete-everything');
+    const request = new Request('http://localhost/api/import/restore', { method: 'POST', body: formData });
     const response = await POST(request);
     expect(response.status).toBe(400);
   });

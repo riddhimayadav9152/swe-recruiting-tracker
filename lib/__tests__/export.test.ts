@@ -53,9 +53,21 @@ describe('buildExportWorkbook', () => {
     const data: ExportData = { applications: [], resumeVersions: [], profile: null };
     const workbook = buildExportWorkbook(data);
     expect(workbook.SheetNames).toEqual([
-      'Applications', 'Job Descriptions', 'Assessments', 'Interviews', 'Offers',
+      'Metadata', 'Applications', 'Job Descriptions', 'Assessments', 'Interviews', 'Offers',
       'Contacts', 'Notes', 'Activity History', 'Resume Versions', 'Profile',
     ]);
+  });
+
+  it('stamps every export with a Metadata sheet declaring the format version, app version, timestamp, and required sheet list', () => {
+    const data: ExportData = { applications: [], resumeVersions: [], profile: null };
+    const workbook = buildExportWorkbook(data);
+    const rows = readSheet(workbook, 'Metadata');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['Export Format Version']).toBe(1);
+    expect(typeof rows[0]['Application Version']).toBe('string');
+    expect(typeof rows[0]['Export Timestamp']).toBe('string');
+    expect(rows[0]['Required Sheets']).toContain('Applications');
+    expect(rows[0]['Required Sheets']).toContain('Profile');
   });
 
   it('formats a date-only nextActionDue as a bare calendar date', () => {

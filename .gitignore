@@ -11,3 +11,4 @@ playwright-report/
 *.db-journal
 *.db-shm
 *.db-wal
+*.tsbuildinfo
