@@ -6,7 +6,13 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
-  timeout: 30_000,
+  // CI runs against `next dev` (not a production build) on a shared, cold
+  // 2-core runner — first-hit route compilation there can eat several
+  // seconds that a locally-warmed dev server never pays, so a plain click
+  // can occasionally miss the default timeout with nothing actually wrong.
+  // Give CI more headroom rather than papering over it in test logic.
+  timeout: process.env.CI ? 60_000 : 30_000,
+  expect: { timeout: process.env.CI ? 10_000 : 5_000 },
   globalSetup: require.resolve('./tests/e2e/global-setup.ts'),
   reporter: [['html', { open: 'never' }]],
   use: { baseURL, browserName: 'chromium', trace: 'retain-on-failure', screenshot: 'only-on-failure' },
