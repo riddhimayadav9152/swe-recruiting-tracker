@@ -153,8 +153,14 @@ describe('applicationImportSchema — field validation', () => {
       whyFit: 'Great match',
       notes: 'Some notes',
       links: [{ label: 'Careers', url: 'https://acme.com/careers', category: 'Company', notes: 'General info' }],
+      clearFields: ['candidatePortalUrl', 'notes'],
     }));
     expect(result.success).toBe(true);
+  });
+
+  it('rejects an unsupported clearFields entry', () => {
+    const result = applicationImportSchema.safeParse(baseApplication({ clearFields: ['company'] }));
+    expect(result.success).toBe(false);
   });
 });
 
@@ -519,6 +525,135 @@ describe('commitJsonImportBatch — update', () => {
     expect(updated.whyFit).toBe('Existing fit');
     expect(updated.lastVerifiedAt?.toISOString()).toBe('2026-07-20T12:00:00.000Z');
     expect(updated.notes).toBe('Existing notes');
+  });
+
+  it('treats explicit nulls as preserve-existing during update unless clearFields asks to clear', async () => {
+    const existing = await prisma.application.create({
+      data: {
+        applicationCode: 'NULL-PRESERVE-1',
+        company: 'Acme',
+        role: 'Software Engineer',
+        applicationUrl: 'https://acme.com/apply',
+        status: 'Not Applied',
+        currentStage: 'Discovered',
+        priority: 'P2',
+        jobId: 'REQ-KEEP',
+        candidatePortalUrl: 'https://portal.acme.com',
+        emailUsed: 'candidate@example.com',
+        portalUsername: 'candidate-user',
+        passwordManagerReference: '1Password: Acme',
+        compensationSummary: '$180k',
+        notes: 'Keep this note',
+      },
+    });
+
+    const rawRecommendation = baseApplication({
+      priority: 'P0',
+      jobId: null,
+      candidatePortalUrl: null,
+      loginEmail: null,
+      portalUsername: null,
+      passwordManagerReference: null,
+      compensationSummary: null,
+      notes: null,
+    });
+    const preview = previewJsonImport(wrap([rawRecommendation]), [{ id: existing.id, company: existing.company, role: existing.role, applicationUrl: existing.applicationUrl }]);
+    expect(preview.ok).toBe(true);
+    if (!preview.ok) return;
+
+    await commitJsonImportBatch(prisma, [{
+      index: preview.rows[0].index,
+      action: 'update',
+      matchedApplicationId: existing.id,
+      data: preview.rows[0].data,
+      fieldPresence: preview.rows[0].fieldPresence,
+    }]);
+
+    const updated = await prisma.application.findUniqueOrThrow({ where: { id: existing.id } });
+    expect(updated.priority).toBe('P0');
+    expect(updated.jobId).toBe('REQ-KEEP');
+    expect(updated.candidatePortalUrl).toBe('https://portal.acme.com');
+    expect(updated.emailUsed).toBe('candidate@example.com');
+    expect(updated.portalUsername).toBe('candidate-user');
+    expect(updated.passwordManagerReference).toBe('1Password: Acme');
+    expect(updated.compensationSummary).toBe('$180k');
+    expect(updated.notes).toBe('Keep this note');
+  });
+
+  it('clears fields only when clearFields explicitly names them', async () => {
+    const existing = await prisma.application.create({
+      data: {
+        applicationCode: 'EXPLICIT-CLEAR-1',
+        company: 'Acme',
+        role: 'Software Engineer',
+        applicationUrl: 'https://acme.com/apply',
+        status: 'Not Applied',
+        currentStage: 'Discovered',
+        priority: 'P2',
+        candidatePortalUrl: 'https://portal.acme.com',
+        compensationSummary: '$180k',
+        notes: 'Clear this note',
+      },
+    });
+    const raw = baseApplication({
+      candidatePortalUrl: null,
+      compensationSummary: null,
+      notes: null,
+      clearFields: ['candidatePortalUrl', 'notes'],
+    });
+
+    await commitJsonImportBatch(prisma, [{
+      index: 0,
+      action: 'update',
+      matchedApplicationId: existing.id,
+      data: raw,
+      fieldPresence: fieldPresenceFor(raw),
+    }]);
+
+    const updated = await prisma.application.findUniqueOrThrow({ where: { id: existing.id } });
+    expect(updated.candidatePortalUrl).toBeNull();
+    expect(updated.notes).toBeNull();
+    expect(updated.compensationSummary).toBe('$180k');
+  });
+
+  it('protects terminal status next action and deadline during recommendation updates', async () => {
+    const existing = await prisma.application.create({
+      data: {
+        applicationCode: 'TERMINAL-PROTECT-1',
+        company: 'Acme',
+        role: 'Software Engineer',
+        applicationUrl: 'https://acme.com/apply',
+        status: 'Rejected',
+        currentStage: 'Rejected',
+        priority: 'P2',
+        nextAction: null,
+        nextActionDue: null,
+        nextActionDueKind: 'date',
+      },
+    });
+    const raw = baseApplication({
+      priority: 'P0',
+      status: 'Not Applied',
+      nextAction: 'Tailor and submit application',
+      nextActionDue: '2026-08-02',
+      nextActionDueKind: 'date',
+    });
+
+    await commitJsonImportBatch(prisma, [{
+      index: 0,
+      action: 'update',
+      matchedApplicationId: existing.id,
+      data: raw,
+      fieldPresence: fieldPresenceFor(raw),
+    }]);
+
+    const updated = await prisma.application.findUniqueOrThrow({ where: { id: existing.id } });
+    expect(updated.status).toBe('Rejected');
+    expect(updated.currentStage).toBe('Rejected');
+    expect(updated.nextAction).toBeNull();
+    expect(updated.nextActionDue).toBeNull();
+    expect(updated.nextActionDueKind).toBe('date');
+    expect(updated.priority).toBe('P0');
   });
 
   it('refuses unsafe update decisions that omit fieldPresence', async () => {

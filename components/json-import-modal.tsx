@@ -36,6 +36,7 @@ const FORMAT_EXAMPLE = {
       links: [
         { label: 'Company careers page', url: 'https://company.com/careers', category: 'Company', notes: null },
       ],
+      clearFields: [],
     },
   ],
 };
@@ -148,6 +149,7 @@ export function JsonImportModal({ onClose, onImported }: { onClose: () => void; 
         <h3 className="text-lg font-semibold">Paste Application Import</h3>
         <p className="mt-1 text-sm text-slate-500">
           Paste a JSON document describing one or more applications (the exact structure future ChatGPT recommendations will use), or upload a .json file.
+          On Update existing, explicit nulls preserve existing values; only fields listed in <code>clearFields</code> are cleared.
         </p>
 
         <div className="mt-4 flex flex-wrap gap-2">

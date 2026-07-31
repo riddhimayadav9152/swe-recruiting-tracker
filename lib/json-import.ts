@@ -38,6 +38,31 @@ const linkImportSchema = z.object({
   notes: nullableString(),
 });
 
+const jsonImportClearableFields = [
+  'jobId',
+  'candidatePortalUrl',
+  'postingStatus',
+  'location',
+  'workModel',
+  'postingDate',
+  'applicationDeadline',
+  'dateFound',
+  'nextAction',
+  'nextActionDue',
+  'loginEmail',
+  'portalUsername',
+  'passwordManagerReference',
+  'confirmationNumber',
+  'compensationSummary',
+  'eligibility',
+  'sponsorship',
+  'whyFit',
+  'lastVerifiedAt',
+  'notes',
+] as const;
+
+type JsonImportClearableField = (typeof jsonImportClearableFields)[number];
+
 export const applicationImportSchema = z.object({
   company: z.string().trim().min(1, 'company is required'),
   role: z.string().trim().min(1, 'role is required'),
@@ -66,6 +91,7 @@ export const applicationImportSchema = z.object({
   lastVerifiedAt: nullableTimestamp('lastVerifiedAt must be a real timestamp'),
   notes: nullableString(),
   links: z.array(linkImportSchema).optional().default([]),
+  clearFields: z.array(z.enum(jsonImportClearableFields)).optional().default([]),
 }).superRefine((data, ctx) => {
   if (!data.nextActionDue) return;
   const kind = data.nextActionDueKind ?? 'date';
@@ -117,8 +143,8 @@ function validateDocumentShape(raw: unknown): { ok: true; applications: unknown[
 
 const normalizeKey = (value: string | null | undefined) => (value ?? '').trim().toLowerCase();
 
-const isAdvancedWorkflowStatus = (status: string): boolean =>
-  !['Not Applied', 'Preparing'].includes(status) && !(TERMINAL_STATUSES as readonly string[]).includes(status);
+const isWorkflowProtectedStatus = (status: string): boolean =>
+  !['Not Applied', 'Preparing'].includes(status);
 
 const hasOwn = (value: unknown, key: string): boolean =>
   typeof value === 'object' && value !== null && Object.prototype.hasOwnProperty.call(value, key);
@@ -153,6 +179,7 @@ const jsonImportTopLevelFields = [
   'lastVerifiedAt',
   'notes',
   'links',
+  'clearFields',
 ] satisfies Array<keyof ApplicationImportRow>;
 
 const buildJsonImportFieldPresence = (rawRow: unknown): JsonImportFieldPresence => {
@@ -348,11 +375,19 @@ async function writeJsonImportRow(
 
     const fieldPresence = decision.fieldPresence;
     if (!fieldPresence) throw new Error(`Row ${decision.index}: update decisions must include fieldPresence from preview; re-run preview and try again`);
-    const advancedExisting = isAdvancedWorkflowStatus(current.status);
+    const workflowProtectedExisting = isWorkflowProtectedStatus(current.status);
     const updateData: Prisma.ApplicationUpdateInput = {};
     const fieldWasSupplied = (field: keyof ApplicationImportRow) => fieldPresence[field] === true;
+    const explicitClears = new Set<JsonImportClearableField>(data.clearFields);
+    const fieldWasExplicitlyCleared = (field: keyof ApplicationImportRow): field is JsonImportClearableField =>
+      (jsonImportClearableFields as readonly string[]).includes(field) && explicitClears.has(field as JsonImportClearableField);
     const maybeSet = <K extends keyof Prisma.ApplicationUpdateInput>(rawKey: keyof ApplicationImportRow, dbKey: K, value: Prisma.ApplicationUpdateInput[K]) => {
+      if (fieldWasExplicitlyCleared(rawKey)) {
+        updateData[dbKey] = null as Prisma.ApplicationUpdateInput[K];
+        return;
+      }
       if (!fieldWasSupplied(rawKey)) return;
+      if (value === null || value === undefined) return;
       updateData[dbKey] = value;
     };
 
@@ -378,9 +413,12 @@ async function writeJsonImportRow(
     maybeSet('whyFit', 'whyFit', data.whyFit);
     maybeSet('lastVerifiedAt', 'lastVerifiedAt', data.lastVerifiedAt ? parseDateTimeLocal(data.lastVerifiedAt) : null);
     maybeSet('notes', 'notes', data.notes);
-    if (!advancedExisting) {
+    if (!workflowProtectedExisting) {
       maybeSet('nextAction', 'nextAction', data.nextAction);
-      if (fieldWasSupplied('nextActionDue')) {
+      if (fieldWasExplicitlyCleared('nextActionDue')) {
+        updateData.nextActionDue = null;
+        updateData.nextActionDueKind = 'date';
+      } else if (fieldWasSupplied('nextActionDue') && data.nextActionDue) {
         updateData.nextActionDue = nextActionDue;
         updateData.nextActionDueKind = nextActionDueKind;
       }
