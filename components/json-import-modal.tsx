@@ -44,6 +44,7 @@ type PreviewRow = {
   index: number;
   status: 'valid' | 'invalid';
   data: Record<string, unknown> | null;
+  fieldPresence: Record<string, boolean> | null;
   errors: Array<{ field: string; message: string }>;
   duplicate: { source: string; matchedOn: string; applicationId?: string; index?: number } | null;
   suggestedAction: 'create' | 'update' | 'skip' | 'error';
@@ -120,6 +121,7 @@ export function JsonImportModal({ onClose, onImported }: { onClose: () => void; 
           index: row.index,
           action: decisions[row.index] ?? 'skip',
           data: row.data,
+          fieldPresence: row.fieldPresence,
           matchedApplicationId: row.duplicate?.source === 'database' ? row.duplicate.applicationId ?? null : null,
         }));
       const response = await fetch('/api/import/json/commit', {

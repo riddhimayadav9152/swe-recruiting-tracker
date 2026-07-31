@@ -129,7 +129,6 @@ describe('createDatabaseBackup', () => {
     const client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 
     const first = await createDatabaseBackup(client);
-    await new Promise((resolve) => setTimeout(resolve, 1100)); // timestamps are second-resolution
     const second = await createDatabaseBackup(client);
     await client.$disconnect();
 

@@ -8,6 +8,7 @@ const rowSchema = z.object({
   index: z.number().int().nonnegative(),
   action: z.enum(['create', 'update', 'skip']),
   data: z.record(z.unknown()),
+  fieldPresence: z.record(z.boolean()).nullable().optional(),
   matchedApplicationId: z.string().trim().min(1).nullable().optional(),
 });
 

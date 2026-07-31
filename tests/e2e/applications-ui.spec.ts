@@ -312,6 +312,42 @@ test.describe('JSON import ("Paste Application Import")', () => {
   });
 });
 
+test.describe('Job descriptions', () => {
+  test('resets unsaved editor values when selecting another application', async ({ page }) => {
+    await page.goto('/');
+    await waitForTrackerLoaded(page);
+
+    const companyA = `JD Leak A ${uniqueId()}`;
+    const companyB = `JD Leak B ${uniqueId()}`;
+    await createOpportunity(page, companyA);
+    await createOpportunity(page, companyB);
+    await openApplication(page, companyA);
+
+    await page.getByRole('button', { name: 'Job Descriptions' }).click();
+    await page.getByLabel('Full job description').fill('Unsaved Company A description');
+    await page.getByLabel('Source URL').fill('https://example.com/company-a-jd');
+    await page.getByLabel('Keywords / tags').fill('company-a-keyword');
+
+    await page.getByRole('button', { name: 'Applications', exact: true }).click();
+    await page.locator('table tbody tr', { hasText: companyB }).click();
+    await page.getByRole('button', { name: 'Job Descriptions' }).click();
+
+    await expect(page.getByLabel('Full job description')).toHaveValue('');
+    await expect(page.getByLabel('Source URL')).toHaveValue('');
+    await expect(page.getByLabel('Keywords / tags')).toHaveValue('');
+
+    await page.getByLabel('Full job description').fill('Company B real description');
+    await page.getByRole('button', { name: 'Save description' }).click();
+    await expect(page.getByText('Job description saved')).toBeVisible();
+
+    const applications = await page.request.get('/api/applications').then((res) => res.json());
+    const appA = applications.find((app: { company: string }) => app.company === companyA);
+    const appB = applications.find((app: { company: string }) => app.company === companyB);
+    expect(appA.jobDescription).toBeNull();
+    expect(appB.jobDescription.fullText).toBe('Company B real description');
+  });
+});
+
 test.describe('Applications table layout', () => {
   test('table is full width with no permanent side panel; row selection opens a dismissible drawer above the table', async ({ page }) => {
     await page.goto('/');

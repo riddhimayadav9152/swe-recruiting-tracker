@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '@/lib/prisma';
 
@@ -71,7 +72,7 @@ export async function createDatabaseBackup(client: PrismaClient = defaultPrisma)
   const sourceDbName = await resolveSourceDbBaseName(client);
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const fileName = `${sourceDbName}.pre-import-${stamp}.bak`;
+  const fileName = `${sourceDbName}.pre-import-${stamp}-${randomUUID()}.bak`;
   const backupPath = path.join(backupDir, fileName);
 
   try {

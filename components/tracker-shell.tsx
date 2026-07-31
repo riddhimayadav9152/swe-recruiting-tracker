@@ -152,6 +152,8 @@ export default function TrackerShell() {
   };
   const [newForm, setNewForm] = useState(emptyNewForm);
   const [quickForm, setQuickForm] = useState<Record<string, string>>({});
+  const [jobDescriptionForm, setJobDescriptionForm] = useState({ fullText: '', sourceUrl: '', keywords: '' });
+  const jobDescriptionFormAppId = useRef<string | null>(null);
   const [quickErrors, setQuickErrors] = useState<Record<string, string[] | undefined>>({});
   const [pendingOverride, setPendingOverride] = useState(false);
   const [importFileHandle, setImportFileHandle] = useState<File | null>(null);
@@ -229,6 +231,16 @@ export default function TrackerShell() {
   }, [applications, selectedAppId]);
 
   const selectedApp = useMemo(() => applications.find((app) => app.id === selectedAppId) ?? null, [applications, selectedAppId]);
+
+  useEffect(() => {
+    if (jobDescriptionFormAppId.current === selectedAppId) return;
+    jobDescriptionFormAppId.current = selectedAppId;
+    setJobDescriptionForm({
+      fullText: selectedApp?.jobDescription?.fullText ?? '',
+      sourceUrl: selectedApp?.jobDescription?.sourceUrl ?? '',
+      keywords: selectedApp?.jobDescription?.keywords ?? '',
+    });
+  }, [selectedApp, selectedAppId]);
 
   const filteredApplications = useMemo(() => {
     const term = search.toLowerCase();
@@ -388,7 +400,7 @@ export default function TrackerShell() {
     const response = await fetch(`/api/applications/${selectedApp.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'description', fullText: quickForm.fullText ?? '', sourceUrl: quickForm.sourceUrl ?? '', keywords: quickForm.keywords ?? '' }),
+      body: JSON.stringify({ action: 'description', fullText: jobDescriptionForm.fullText, sourceUrl: jobDescriptionForm.sourceUrl, keywords: jobDescriptionForm.keywords }),
     });
     if (response.ok) {
       toast.success('Job description saved');
@@ -809,11 +821,11 @@ export default function TrackerShell() {
                     {selectedApp ? (
                       <div className="mt-4 space-y-3">
                         <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="jd-full-text">Full job description</label>
-                        <textarea id="jd-full-text" value={quickForm.fullText ?? selectedApp.jobDescription?.fullText ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, fullText: e.target.value }))} rows={10} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Paste the full job description" />
+                        <textarea id="jd-full-text" value={jobDescriptionForm.fullText} onChange={(e) => setJobDescriptionForm((prev) => ({ ...prev, fullText: e.target.value }))} rows={10} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Paste the full job description" />
                         <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="jd-source-url">Source URL</label>
-                        <input id="jd-source-url" value={quickForm.sourceUrl ?? selectedApp.jobDescription?.sourceUrl ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, sourceUrl: e.target.value }))} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="https://…" />
+                        <input id="jd-source-url" value={jobDescriptionForm.sourceUrl} onChange={(e) => setJobDescriptionForm((prev) => ({ ...prev, sourceUrl: e.target.value }))} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="https://…" />
                         <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="jd-keywords">Keywords / tags</label>
-                        <input id="jd-keywords" value={quickForm.keywords ?? selectedApp.jobDescription?.keywords ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, keywords: e.target.value }))} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="e.g. Python, distributed systems, backend" />
+                        <input id="jd-keywords" value={jobDescriptionForm.keywords} onChange={(e) => setJobDescriptionForm((prev) => ({ ...prev, keywords: e.target.value }))} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="e.g. Python, distributed systems, backend" />
                         <button onClick={saveJobDescription} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f]">Save description</button>
                       </div>
                     ) : <div className="text-sm text-slate-500">Select an application</div>}

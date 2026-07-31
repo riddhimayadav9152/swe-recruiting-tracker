@@ -6,6 +6,7 @@ import {
   applicationImportSchema,
   commitJsonImportBatch,
   previewJsonImport,
+  type JsonImportFieldPresence,
   type JsonImportRowDecision,
 } from '../json-import';
 import type { DuplicateMatchCandidate } from '../import';
@@ -54,6 +55,9 @@ const wrap = (applications: unknown[], format: string | undefined = JSON_IMPORT_
   format,
   applications,
 });
+
+const fieldPresenceFor = (row: Record<string, unknown>): JsonImportFieldPresence =>
+  Object.fromEntries(Object.keys(row).map((key) => [key, true])) as JsonImportFieldPresence;
 
 describe('applicationImportSchema — field validation', () => {
   it('accepts a minimal valid row, defaulting every optional field to null/empty', () => {
@@ -209,6 +213,18 @@ describe('previewJsonImport — per-row validation and structured errors', () =>
     expect(result.rows[1].index).toBe(1);
     expect(result.rows[1].status).toBe('valid');
   });
+
+  it('preserves field presence separately from normalized optional null/default values', () => {
+    const result = previewJsonImport(wrap([baseApplication({ candidatePortalUrl: null, links: [] })]), []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.rows[0].data?.jobId).toBeNull();
+    expect(result.rows[0].data?.links).toEqual([]);
+    expect(result.rows[0].fieldPresence?.jobId).toBe(false);
+    expect(result.rows[0].fieldPresence?.candidatePortalUrl).toBe(true);
+    expect(result.rows[0].fieldPresence?.links).toBe(true);
+  });
 });
 
 describe('previewJsonImport — duplicate detection', () => {
@@ -310,6 +326,21 @@ describe('commitJsonImportBatch — create', () => {
     expect(activities.map((a) => a.eventType)).toContain('JSON import created');
   });
 
+  it('persists lastVerifiedAt when creating from JSON', async () => {
+    const decisions: JsonImportRowDecision[] = [{
+      index: 0,
+      action: 'create',
+      data: baseApplication({ lastVerifiedAt: '2026-07-29T18:00:00Z' }),
+    }];
+
+    const summary = await commitJsonImportBatch(prisma, decisions);
+    expect(summary.created).toBe(1);
+    if (!summary.outcomes[0].ok) throw new Error('expected success');
+    const applicationId = (summary.outcomes[0] as { applicationId: string }).applicationId;
+    const application = await prisma.application.findUniqueOrThrow({ where: { id: applicationId } });
+    expect(application.lastVerifiedAt?.toISOString()).toBe('2026-07-29T18:00:00.000Z');
+  });
+
   it('computes nextActionDue using the personal-deadline rules when not supplied, for a Not Applied/Preparing row', async () => {
     const decisions: JsonImportRowDecision[] = [{
       index: 0,
@@ -357,6 +388,11 @@ describe('commitJsonImportBatch — update', () => {
         compensationSummary: '$200k',
         links: [{ label: 'New link', url: 'https://new.example.com', category: 'Application' }],
       }),
+      fieldPresence: fieldPresenceFor(baseApplication({
+        priority: 'P0',
+        compensationSummary: '$200k',
+        links: [{ label: 'New link', url: 'https://new.example.com', category: 'Application' }],
+      })),
     }];
 
     const summary = await commitJsonImportBatch(prisma, decisions);
@@ -399,6 +435,14 @@ describe('commitJsonImportBatch — update', () => {
         nextActionDueKind: 'date',
         eligibility: 'Metadata enrichment',
       }),
+      fieldPresence: fieldPresenceFor(baseApplication({
+        status: 'Not Applied',
+        priority: 'P0',
+        nextAction: 'Apply now',
+        nextActionDue: '2026-07-31',
+        nextActionDueKind: 'date',
+        eligibility: 'Metadata enrichment',
+      })),
     }];
 
     const summary = await commitJsonImportBatch(prisma, decisions);
@@ -414,23 +458,101 @@ describe('commitJsonImportBatch — update', () => {
     expect(updated.eligibility).toBe('Metadata enrichment');
   });
 
-  it('fails when matchedApplicationId is missing', async () => {
-    const decisions: JsonImportRowDecision[] = [{ index: 0, action: 'update', data: baseApplication() }];
-    await expect(commitJsonImportBatch(prisma, decisions)).rejects.toThrow(/no matching existing application/);
+  it('uses preview fieldPresence, not normalized null keys, when updating through the browser flow', async () => {
+    const existing = await prisma.application.create({
+      data: {
+        applicationCode: 'PRESERVE-1',
+        company: 'Acme',
+        role: 'Software Engineer',
+        applicationUrl: 'https://acme.com/apply',
+        status: 'Not Applied',
+        currentStage: 'Discovered',
+        priority: 'P2',
+        candidatePortalUrl: 'https://portal.acme.com',
+        location: 'Austin, TX',
+        workModel: 'Hybrid',
+        postingStatus: 'Open',
+        postingDate: new Date('2026-07-01T00:00:00.000Z'),
+        emailUsed: 'candidate@example.com',
+        portalUsername: 'candidate-user',
+        passwordManagerReference: '1Password: Acme',
+        confirmationNumber: 'CONF-KEEP',
+        compensationSummary: '$180k',
+        eligibility: 'Existing eligibility',
+        sponsorship: 'Existing sponsorship',
+        whyFit: 'Existing fit',
+        lastVerifiedAt: new Date('2026-07-20T12:00:00.000Z'),
+        notes: 'Existing notes',
+      },
+    });
+
+    const rawRecommendation = baseApplication({ priority: 'P0' });
+    const preview = previewJsonImport(wrap([rawRecommendation]), [{ id: existing.id, company: existing.company, role: existing.role, applicationUrl: existing.applicationUrl }]);
+    expect(preview.ok).toBe(true);
+    if (!preview.ok) return;
+    expect(preview.rows[0].data?.candidatePortalUrl).toBeNull();
+    expect(preview.rows[0].fieldPresence?.candidatePortalUrl).toBe(false);
+
+    const summary = await commitJsonImportBatch(prisma, [{
+      index: preview.rows[0].index,
+      action: 'update',
+      matchedApplicationId: existing.id,
+      data: preview.rows[0].data,
+      fieldPresence: preview.rows[0].fieldPresence,
+    }]);
+    expect(summary.updated).toBe(1);
+
+    const updated = await prisma.application.findUniqueOrThrow({ where: { id: existing.id } });
+    expect(updated.priority).toBe('P0');
+    expect(updated.candidatePortalUrl).toBe('https://portal.acme.com');
+    expect(updated.location).toBe('Austin, TX');
+    expect(updated.workModel).toBe('Hybrid');
+    expect(updated.postingStatus).toBe('Open');
+    expect(updated.postingDate?.toISOString()).toBe('2026-07-01T00:00:00.000Z');
+    expect(updated.emailUsed).toBe('candidate@example.com');
+    expect(updated.portalUsername).toBe('candidate-user');
+    expect(updated.passwordManagerReference).toBe('1Password: Acme');
+    expect(updated.confirmationNumber).toBe('CONF-KEEP');
+    expect(updated.compensationSummary).toBe('$180k');
+    expect(updated.eligibility).toBe('Existing eligibility');
+    expect(updated.sponsorship).toBe('Existing sponsorship');
+    expect(updated.whyFit).toBe('Existing fit');
+    expect(updated.lastVerifiedAt?.toISOString()).toBe('2026-07-20T12:00:00.000Z');
+    expect(updated.notes).toBe('Existing notes');
   });
 
-  it('fails when the matched application no longer exists', async () => {
-    const decisions: JsonImportRowDecision[] = [{ index: 0, action: 'update', matchedApplicationId: 'does-not-exist', data: baseApplication() }];
-    await expect(commitJsonImportBatch(prisma, decisions)).rejects.toThrow(/no longer exists/);
-  });
-
-  it('fails when the matched application no longer matches this row by company+role or URL (stale match)', async () => {
+  it('refuses unsafe update decisions that omit fieldPresence', async () => {
     const existing = await seedExisting();
     const decisions: JsonImportRowDecision[] = [{
       index: 0,
       action: 'update',
       matchedApplicationId: existing.id,
-      data: baseApplication({ company: 'Totally Different Co', role: 'Totally Different Role', applicationUrl: 'https://different.example.com/apply' }),
+      data: baseApplication({ priority: 'P0' }),
+    }];
+    await expect(commitJsonImportBatch(prisma, decisions)).rejects.toThrow(/fieldPresence/);
+  });
+
+  it('fails when matchedApplicationId is missing', async () => {
+    const raw = baseApplication();
+    const decisions: JsonImportRowDecision[] = [{ index: 0, action: 'update', data: raw, fieldPresence: fieldPresenceFor(raw) }];
+    await expect(commitJsonImportBatch(prisma, decisions)).rejects.toThrow(/no matching existing application/);
+  });
+
+  it('fails when the matched application no longer exists', async () => {
+    const raw = baseApplication();
+    const decisions: JsonImportRowDecision[] = [{ index: 0, action: 'update', matchedApplicationId: 'does-not-exist', data: raw, fieldPresence: fieldPresenceFor(raw) }];
+    await expect(commitJsonImportBatch(prisma, decisions)).rejects.toThrow(/no longer exists/);
+  });
+
+  it('fails when the matched application no longer matches this row by company+role or URL (stale match)', async () => {
+    const existing = await seedExisting();
+    const raw = baseApplication({ company: 'Totally Different Co', role: 'Totally Different Role', applicationUrl: 'https://different.example.com/apply' });
+    const decisions: JsonImportRowDecision[] = [{
+      index: 0,
+      action: 'update',
+      matchedApplicationId: existing.id,
+      data: raw,
+      fieldPresence: fieldPresenceFor(raw),
     }];
     await expect(commitJsonImportBatch(prisma, decisions)).rejects.toThrow(/no longer matches/);
   });
@@ -471,7 +593,13 @@ describe('commitJsonImportBatch — transaction rollback', () => {
     });
     const decisions: JsonImportRowDecision[] = [
       { index: 0, action: 'create', data: baseApplication({ company: 'Should Roll Back Co', applicationUrl: 'https://should-roll-back.example.com/apply' }) },
-      { index: 1, action: 'update', matchedApplicationId: existing.id, data: baseApplication({ company: 'Mismatched Co', role: 'Mismatched Role', applicationUrl: 'https://mismatched.example.com/apply' }) },
+      {
+        index: 1,
+        action: 'update',
+        matchedApplicationId: existing.id,
+        data: baseApplication({ company: 'Mismatched Co', role: 'Mismatched Role', applicationUrl: 'https://mismatched.example.com/apply' }),
+        fieldPresence: fieldPresenceFor(baseApplication({ company: 'Mismatched Co', role: 'Mismatched Role', applicationUrl: 'https://mismatched.example.com/apply' })),
+      },
     ];
     await expect(commitJsonImportBatch(prisma, decisions)).rejects.toThrow(/no longer matches/);
 

@@ -83,6 +83,7 @@ export type JsonImportRowPreview = {
   index: number;
   status: 'valid' | 'invalid';
   data: ApplicationImportRow | null;
+  fieldPresence: JsonImportFieldPresence | null;
   errors: FieldValidationError[];
   duplicate: { source: 'database'; applicationId: string; matchedOn: string } | { source: 'batch'; index: number; matchedOn: string } | null;
   suggestedAction: 'create' | 'update' | 'skip' | 'error';
@@ -121,6 +122,46 @@ const isAdvancedWorkflowStatus = (status: string): boolean =>
 
 const hasOwn = (value: unknown, key: string): boolean =>
   typeof value === 'object' && value !== null && Object.prototype.hasOwnProperty.call(value, key);
+
+export type JsonImportFieldPresence = Partial<Record<keyof ApplicationImportRow, boolean>>;
+
+const jsonImportTopLevelFields = [
+  'company',
+  'role',
+  'jobId',
+  'applicationUrl',
+  'candidatePortalUrl',
+  'priority',
+  'status',
+  'postingStatus',
+  'location',
+  'workModel',
+  'postingDate',
+  'applicationDeadline',
+  'dateFound',
+  'nextAction',
+  'nextActionDue',
+  'nextActionDueKind',
+  'loginEmail',
+  'portalUsername',
+  'passwordManagerReference',
+  'confirmationNumber',
+  'compensationSummary',
+  'eligibility',
+  'sponsorship',
+  'whyFit',
+  'lastVerifiedAt',
+  'notes',
+  'links',
+] satisfies Array<keyof ApplicationImportRow>;
+
+const buildJsonImportFieldPresence = (rawRow: unknown): JsonImportFieldPresence => {
+  const presence: JsonImportFieldPresence = {};
+  for (const field of jsonImportTopLevelFields) {
+    presence[field] = hasOwn(rawRow, field);
+  }
+  return presence;
+};
 
 const deriveJsonImportDeadline = (
   data: ApplicationImportRow,
@@ -174,11 +215,12 @@ export function previewJsonImport(raw: unknown, existingApplications: DuplicateM
     const parsed = applicationImportSchema.safeParse(rawRow);
     if (!parsed.success) {
       const errors = parsed.error.issues.map((issue) => ({ field: issue.path.join('.') || '(root)', message: issue.message }));
-      rows.push({ index, status: 'invalid', data: null, errors, duplicate: null, suggestedAction: 'error', generatedNextActionDue: null });
+      rows.push({ index, status: 'invalid', data: null, fieldPresence: null, errors, duplicate: null, suggestedAction: 'error', generatedNextActionDue: null });
       return;
     }
 
     const data = parsed.data;
+    const fieldPresence = buildJsonImportFieldPresence(rawRow);
     const company = normalizeKey(data.company);
     const role = normalizeKey(data.role);
     const url = normalizeKey(data.applicationUrl);
@@ -213,6 +255,7 @@ export function previewJsonImport(raw: unknown, existingApplications: DuplicateM
       index,
       status: 'valid',
       data,
+      fieldPresence,
       errors: [],
       duplicate,
       suggestedAction: duplicate ? 'skip' : 'create',
@@ -227,6 +270,7 @@ export type JsonImportRowDecision = {
   index: number;
   action: 'create' | 'update' | 'skip';
   data: unknown;
+  fieldPresence?: JsonImportFieldPresence | null;
   matchedApplicationId?: string | null;
 };
 
@@ -287,6 +331,7 @@ async function writeJsonImportRow(
     eligibility: data.eligibility,
     sponsorship: data.sponsorship,
     whyFit: data.whyFit,
+    lastVerifiedAt: data.lastVerifiedAt ? parseDateTimeLocal(data.lastVerifiedAt) : null,
     notes: data.notes,
   };
 
@@ -301,11 +346,13 @@ async function writeJsonImportRow(
     const sameCompanyRole = normalizeKey(current.company) === normalizeKey(data.company) && normalizeKey(current.role) === normalizeKey(data.role);
     if (!sameUrl && !sameCompanyRole) throw new Error(`Row ${decision.index}: the matched application no longer matches this row — it may have changed since preview`);
 
-    const raw = decision.data;
+    const fieldPresence = decision.fieldPresence;
+    if (!fieldPresence) throw new Error(`Row ${decision.index}: update decisions must include fieldPresence from preview; re-run preview and try again`);
     const advancedExisting = isAdvancedWorkflowStatus(current.status);
     const updateData: Prisma.ApplicationUpdateInput = {};
-    const maybeSet = <K extends keyof Prisma.ApplicationUpdateInput>(rawKey: string, dbKey: K, value: Prisma.ApplicationUpdateInput[K]) => {
-      if (!hasOwn(raw, rawKey)) return;
+    const fieldWasSupplied = (field: keyof ApplicationImportRow) => fieldPresence[field] === true;
+    const maybeSet = <K extends keyof Prisma.ApplicationUpdateInput>(rawKey: keyof ApplicationImportRow, dbKey: K, value: Prisma.ApplicationUpdateInput[K]) => {
+      if (!fieldWasSupplied(rawKey)) return;
       updateData[dbKey] = value;
     };
 
@@ -329,11 +376,11 @@ async function writeJsonImportRow(
     maybeSet('eligibility', 'eligibility', data.eligibility);
     maybeSet('sponsorship', 'sponsorship', data.sponsorship);
     maybeSet('whyFit', 'whyFit', data.whyFit);
-    maybeSet('lastVerifiedAt', 'lastVerifiedAt', hasOwn(raw, 'lastVerifiedAt') ? (data.lastVerifiedAt ? parseDateTimeLocal(data.lastVerifiedAt) : null) : undefined);
+    maybeSet('lastVerifiedAt', 'lastVerifiedAt', data.lastVerifiedAt ? parseDateTimeLocal(data.lastVerifiedAt) : null);
     maybeSet('notes', 'notes', data.notes);
     if (!advancedExisting) {
       maybeSet('nextAction', 'nextAction', data.nextAction);
-      if (hasOwn(raw, 'nextActionDue')) {
+      if (fieldWasSupplied('nextActionDue')) {
         updateData.nextActionDue = nextActionDue;
         updateData.nextActionDueKind = nextActionDueKind;
       }
@@ -344,15 +391,17 @@ async function writeJsonImportRow(
     }
 
     const existingLinks = await tx.applicationLink.findMany({ where: { applicationId: decision.matchedApplicationId } });
-    for (const link of data.links) {
-      const matching = existingLinks.find((existingLink) => normalizeKey(existingLink.url) === normalizeKey(link.url));
-      if (matching) {
-        await tx.applicationLink.update({
-          where: { id: matching.id },
-          data: { label: link.label, category: link.category, notes: link.notes },
-        });
-      } else {
-        await tx.applicationLink.create({ data: { applicationId: decision.matchedApplicationId, label: link.label, url: link.url, category: link.category, notes: link.notes } });
+    if (fieldWasSupplied('links')) {
+      for (const link of data.links) {
+        const matching = existingLinks.find((existingLink) => normalizeKey(existingLink.url) === normalizeKey(link.url));
+        if (matching) {
+          await tx.applicationLink.update({
+            where: { id: matching.id },
+            data: { label: link.label, category: link.category, notes: link.notes },
+          });
+        } else {
+          await tx.applicationLink.create({ data: { applicationId: decision.matchedApplicationId, label: link.label, url: link.url, category: link.category, notes: link.notes } });
+        }
       }
     }
     await tx.activity.create({
