@@ -34,6 +34,8 @@ export type ApplicationInput = {
   status?: ApplicationStatus;
   currentStage?: string;
   location?: string;
+  postingStatus?: PostingStatus | null;
+  postingDate?: string | null;
   applicationDeadline?: string | null;
   dateFound?: string | null;
   notes?: string;
@@ -63,7 +65,7 @@ export const generateNextAction = (status: ApplicationStatus, currentStage?: str
     case 'Preparing':
       return 'Finish tailoring and submit';
     case 'Applied':
-      return 'Monitor application and email';
+      return 'Check email and candidate portal';
     case 'OA':
       return 'Prepare for and complete OA';
     case 'Recruiter Screen':
@@ -71,7 +73,7 @@ export const generateNextAction = (status: ApplicationStatus, currentStage?: str
     case 'Final Round':
       return `Prepare for ${currentStage ?? 'interview'}`;
     case 'Offer':
-      return 'Review, compare, and respond to offer';
+      return 'Review, compare and respond to offer';
     case 'Rejected':
     case 'Withdrawn':
     case 'Closed':
@@ -194,6 +196,8 @@ export type PersonalApplyByInput = {
   postingStatus?: string | null;
   /** Only consulted when postingStatus is "Opening Soon" — treated as the known opening date. */
   postingDate?: Date | null;
+  /** Test hook; defaults to today's UTC date. */
+  today?: Date;
 };
 
 /**
@@ -214,6 +218,7 @@ export type PersonalApplyByInput = {
  */
 export function computePersonalApplyByDate(input: PersonalApplyByInput): Date {
   const referenceDate = input.dateFound ?? utcToday();
+  const today = input.today ?? utcToday();
   let candidate = addUtcDays(referenceDate, PRIORITY_APPLY_BY_DAYS[input.priority]);
 
   if (input.postingStatus === 'Opening Soon' && input.postingDate) {
@@ -221,8 +226,14 @@ export function computePersonalApplyByDate(input: PersonalApplyByInput): Date {
   }
 
   if (input.applicationDeadline) {
-    const twoDaysBeforeOfficial = addUtcDays(input.applicationDeadline, -2);
+    if (input.applicationDeadline.getTime() < today.getTime()) {
+      return input.applicationDeadline;
+    }
+
+    let twoDaysBeforeOfficial = addUtcDays(input.applicationDeadline, -2);
+    if (twoDaysBeforeOfficial.getTime() < today.getTime()) twoDaysBeforeOfficial = today;
     if (twoDaysBeforeOfficial.getTime() < candidate.getTime()) candidate = twoDaysBeforeOfficial;
+    if (candidate.getTime() < referenceDate.getTime()) candidate = referenceDate;
     if (candidate.getTime() > input.applicationDeadline.getTime()) candidate = input.applicationDeadline;
   }
 
@@ -236,4 +247,16 @@ export function nextBusinessDay(date: Date): Date {
   if (day === 6) next = addUtcDays(next, 2);
   else if (day === 0) next = addUtcDays(next, 1);
   return next;
+}
+
+export function personalDeadlineBeforeInstant(officialInstant: Date, bufferMs: number, now: Date = new Date()): Date {
+  if (officialInstant.getTime() <= now.getTime()) return officialInstant;
+  const buffered = new Date(officialInstant.getTime() - bufferMs);
+  return buffered.getTime() < now.getTime() ? now : buffered;
+}
+
+export function personalDateBeforeOfficialDate(officialDate: Date, bufferDays: number, today: Date = utcToday()): Date {
+  if (officialDate.getTime() < today.getTime()) return officialDate;
+  const buffered = addUtcDays(officialDate, -bufferDays);
+  return buffered.getTime() < today.getTime() ? today : buffered;
 }

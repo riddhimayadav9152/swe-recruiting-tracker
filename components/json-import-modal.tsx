@@ -31,6 +31,7 @@ const FORMAT_EXAMPLE = {
       eligibility: 'December 2027 graduates eligible',
       sponsorship: 'U.S. work authorization required',
       whyFit: 'Strong backend and distributed-systems fit.',
+      lastVerifiedAt: '2026-07-29T18:00:00Z',
       notes: 'Application information verified July 29, 2026.',
       links: [
         { label: 'Company careers page', url: 'https://company.com/careers', category: 'Company', notes: null },
@@ -107,6 +108,10 @@ export function JsonImportModal({ onClose, onImported }: { onClose: () => void; 
 
   const confirmImport = async () => {
     if (!rows) return;
+    if (rows.some((row) => row.status === 'invalid')) {
+      toast.error('Fix or remove invalid rows before confirming import');
+      return;
+    }
     setLoading(true);
     try {
       const payload = rows
@@ -180,7 +185,7 @@ export function JsonImportModal({ onClose, onImported }: { onClose: () => void; 
                       className="rounded-lg border border-[#ffc4d6] bg-white p-1.5 text-xs"
                     >
                       <option value="skip">Skip</option>
-                      <option value="create">Create</option>
+                      {!row.duplicate && <option value="create">Create</option>}
                       {row.duplicate?.source === 'database' && <option value="update">Update existing</option>}
                     </select>
                   )}
@@ -205,7 +210,7 @@ export function JsonImportModal({ onClose, onImported }: { onClose: () => void; 
 
             <div className="flex justify-end gap-2">
               <button onClick={onClose} className="rounded-lg border border-[#ffc4d6] bg-white px-4 py-2 text-sm text-slate-600">Cancel</button>
-              <button onClick={confirmImport} disabled={loading} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm disabled:opacity-50">
+              <button onClick={confirmImport} disabled={loading || rows.some((row) => row.status === 'invalid')} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm disabled:opacity-50">
                 {loading ? 'Importing…' : 'Confirm Import'}
               </button>
             </div>

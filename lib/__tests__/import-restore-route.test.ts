@@ -3,10 +3,12 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
+import { PrismaClient } from '@prisma/client';
 import { EXPORT_FORMAT_VERSION, METADATA_SHEET_NAME, REQUIRED_SHEET_NAMES } from '../export-format';
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const testDbPath = path.join(projectRoot, 'data', 'import-restore-route-test.db');
+const testDatabaseUrl = 'file:../data/import-restore-route-test.db';
 
 function pushSchema(databaseUrl: string) {
   execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
@@ -14,6 +16,32 @@ function pushSchema(databaseUrl: string) {
     env: { ...process.env, DATABASE_URL: databaseUrl },
     stdio: 'pipe',
   });
+}
+
+async function clearDatabase(databaseUrl: string) {
+  const client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+  await client.$transaction([
+    client.activity.deleteMany(),
+    client.note.deleteMany(),
+    client.contact.deleteMany(),
+    client.jobDescription.deleteMany(),
+    client.applicationLink.deleteMany(),
+    client.assessment.deleteMany(),
+    client.interview.deleteMany(),
+    client.offer.deleteMany(),
+    client.document.deleteMany(),
+    client.application.deleteMany(),
+    client.resumeVersion.deleteMany(),
+    client.userProfile.deleteMany(),
+  ]);
+  await client.$disconnect();
+}
+
+async function prepareTestDatabase(): Promise<string> {
+  fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), testDbPath);
+  pushSchema(testDatabaseUrl);
+  await clearDatabase(testDatabaseUrl);
+  return testDatabaseUrl;
 }
 
 function buildRestoreWorkbookBuffer(applicationsOverride?: Array<Record<string, unknown>>): Buffer {
@@ -52,8 +80,7 @@ describe('POST /api/import/restore', () => {
   });
 
   it('backs up before writing (returning only a safe fileName, never a path) and restores every sheet', async () => {
-    const databaseUrl = `file:${testDbPath}`;
-    pushSchema(databaseUrl);
+    const databaseUrl = await prepareTestDatabase();
     process.env.DATABASE_URL = databaseUrl;
     vi.resetModules(); // lib/prisma.ts resolves DATABASE_URL once at import time.
 
@@ -83,8 +110,7 @@ describe('POST /api/import/restore', () => {
   });
 
   it('rejects a request with no file', async () => {
-    const databaseUrl = `file:${testDbPath}`;
-    pushSchema(databaseUrl);
+    const databaseUrl = await prepareTestDatabase();
     process.env.DATABASE_URL = databaseUrl;
     vi.resetModules();
 
@@ -95,8 +121,7 @@ describe('POST /api/import/restore', () => {
   });
 
   it('rejects a request with a missing or invalid mode', async () => {
-    const databaseUrl = `file:${testDbPath}`;
-    pushSchema(databaseUrl);
+    const databaseUrl = await prepareTestDatabase();
     process.env.DATABASE_URL = databaseUrl;
     vi.resetModules();
 
@@ -111,8 +136,7 @@ describe('POST /api/import/restore', () => {
   });
 
   it('returns 422 (not 200, not 400) when preflight validation fails, still with structured errors and the backup filename', async () => {
-    const databaseUrl = `file:${testDbPath}`;
-    pushSchema(databaseUrl);
+    const databaseUrl = await prepareTestDatabase();
     process.env.DATABASE_URL = databaseUrl;
     vi.resetModules();
 

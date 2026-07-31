@@ -8,8 +8,18 @@ type ImportDbClient = Prisma.TransactionClient | PrismaClient;
 /** Duck-typed check for Prisma's "unique constraint violated" error (code P2002) — avoids importing the `Prisma` runtime value just for an `instanceof` check. */
 export const isUniqueConstraintError = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'P2002';
-import { formatDateOnly, isDateOnlyString, isDateTimeLocalString, isValidIanaTimeZone, parseDateOnly, parseZonedDateTime } from '@/lib/dates';
-import { deriveInitialStage, generateApplicationCode, generateNextAction, priorities, statuses, type ApplicationStatus } from '@/lib/recruiting';
+import { addUtcDays, formatDateOnly, isDateOnlyString, isDateTimeLocalString, isValidIanaTimeZone, parseDateOnly, parseZonedDateTime, utcToday } from '@/lib/dates';
+import {
+  computePersonalApplyByDate,
+  deriveInitialStage,
+  generateApplicationCode,
+  generateNextAction,
+  personalDateBeforeOfficialDate,
+  personalDeadlineBeforeInstant,
+  priorities,
+  statuses,
+  type ApplicationStatus,
+} from '@/lib/recruiting';
 import { selectCurrentAssessment, selectCurrentInterview } from '@/lib/current-record';
 
 // --- Excel date parsing -----------------------------------------------------
@@ -963,33 +973,39 @@ export function deriveImportNextAction(data: NormalizedImportRow, currentStage: 
   }
 
   if (TERMINAL_STATUSES.includes(status)) {
-    return { nextAction: generateNextAction(status, currentStage), nextActionDue: null, nextActionDueKind: 'timestamp' };
+    return { nextAction: generateNextAction(status, currentStage), nextActionDue: null, nextActionDueKind: 'date' };
   }
 
   if (status === 'Offer') {
     // offerDecisionDeadline is required for Offer rows (enforced during
     // normalization), so this is always present here.
-    return { nextAction: generateNextAction(status, currentStage), nextActionDue: parseDateOnly(data.offerDecisionDeadline), nextActionDueKind: 'date' };
+    const deadline = parseDateOnly(data.offerDecisionDeadline);
+    return { nextAction: generateNextAction(status, currentStage), nextActionDue: deadline ? personalDateBeforeOfficialDate(deadline, 2) : null, nextActionDueKind: 'date' };
   }
 
   if (status === 'OA' && data.assessmentDueAt && data.assessmentTimezone) {
-    return { nextAction: generateNextAction(status, currentStage), nextActionDue: parseZonedDateTime(data.assessmentDueAt, data.assessmentTimezone), nextActionDueKind: 'timestamp' };
+    const dueAt = parseZonedDateTime(data.assessmentDueAt, data.assessmentTimezone);
+    return { nextAction: generateNextAction(status, currentStage), nextActionDue: dueAt ? personalDeadlineBeforeInstant(dueAt, 24 * 60 * 60 * 1000) : null, nextActionDueKind: 'timestamp' };
   }
 
   if (INTERVIEW_STAGES.includes(status) && data.interviewScheduledStart && data.interviewTimezone) {
-    return { nextAction: generateNextAction(status, currentStage), nextActionDue: parseZonedDateTime(data.interviewScheduledStart, data.interviewTimezone), nextActionDueKind: 'timestamp' };
+    const scheduledStart = parseZonedDateTime(data.interviewScheduledStart, data.interviewTimezone);
+    return { nextAction: generateNextAction(status, currentStage), nextActionDue: scheduledStart ? personalDeadlineBeforeInstant(scheduledStart, 24 * 60 * 60 * 1000) : null, nextActionDueKind: 'timestamp' };
   }
 
   if (status === 'Applied') {
-    const reference = data.dateApplied ? parseDateOnly(data.dateApplied) ?? new Date() : new Date();
-    return { nextAction: generateNextAction(status, currentStage), nextActionDue: new Date(reference.getTime() + 10 * 86400000), nextActionDueKind: 'timestamp' };
+    const reference = data.dateApplied ? parseDateOnly(data.dateApplied) ?? utcToday() : utcToday();
+    return { nextAction: generateNextAction(status, currentStage), nextActionDue: addUtcDays(reference, 7), nextActionDueKind: 'date' };
   }
 
   if (status === 'Not Applied' || status === 'Preparing') {
-    if (data.applicationDeadline) {
-      return { nextAction: generateNextAction(status, currentStage), nextActionDue: parseDateOnly(data.applicationDeadline), nextActionDueKind: 'date' };
-    }
-    return { nextAction: generateNextAction(status, currentStage), nextActionDue: new Date(Date.now() + 2 * 86400000), nextActionDueKind: 'timestamp' };
+    const dateFound = data.dateFound ? parseDateOnly(data.dateFound) : null;
+    const applicationDeadline = data.applicationDeadline ? parseDateOnly(data.applicationDeadline) : null;
+    return {
+      nextAction: generateNextAction(status, currentStage),
+      nextActionDue: computePersonalApplyByDate({ priority: data.priority, dateFound, applicationDeadline }),
+      nextActionDueKind: 'date',
+    };
   }
 
   // OA/interview statuses without a schedule column supplied — a safe,
@@ -997,7 +1013,7 @@ export function deriveImportNextAction(data: NormalizedImportRow, currentStage: 
   // (In practice this branch is now unreachable for OA/interview specifically
   // since those get downgraded to Applied above when their schedule is
   // missing — kept as a defensive fallback.)
-  return { nextAction: generateNextAction(status, currentStage), nextActionDue: new Date(Date.now() + 4 * 86400000), nextActionDueKind: 'timestamp' };
+  return { nextAction: generateNextAction(status, currentStage), nextActionDue: null, nextActionDueKind: 'date' };
 }
 
 // --- Resume version resolution ------------------------------------------------

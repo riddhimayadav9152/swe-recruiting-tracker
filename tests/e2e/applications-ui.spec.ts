@@ -21,10 +21,11 @@ const createOpportunity = async (page: Page, company: string) => {
 const openApplication = async (page: Page, company: string) => {
   await page.getByRole('button', { name: 'Applications', exact: true }).click();
   await waitForTrackerLoaded(page);
-  const alreadyOpen = await page.getByTestId('application-detail-drawer').filter({ hasText: company }).count();
-  if (!alreadyOpen) {
+  const drawer = page.getByTestId('application-detail-drawer').filter({ hasText: company });
+  if (!(await drawer.count())) {
     await page.locator('table tbody tr', { hasText: company }).click();
   }
+  await expect(drawer).toBeVisible();
 };
 
 test.describe('Edit Application', () => {
@@ -282,7 +283,7 @@ test.describe('JSON import ("Paste Application Import")', () => {
     await expect(page.getByRole('button', { name: '+ New' })).toBeVisible();
   });
 
-  test('rolls back the entire batch when both rows in an in-batch duplicate are forced to Create', async ({ page }) => {
+  test('does not offer Create for an in-batch duplicate and imports only the non-duplicate row', async ({ page }) => {
     await page.goto('/');
     await waitForTrackerLoaded(page);
 
@@ -297,23 +298,17 @@ test.describe('JSON import ("Paste Application Import")', () => {
     await expect(page.getByText('2 valid, 0 invalid')).toBeVisible();
     await expect(page.getByTestId('json-import-duplicate-warning')).toBeVisible();
 
-    // Row 2 defaults to Skip because it's flagged as a duplicate of row 1
-    // within this same batch — force BOTH to Create so the commit hits the
-    // "matching application now exists" guard and rolls the whole batch back.
     const rowActions = page.getByTestId('json-import-row-action');
     await rowActions.nth(0).selectOption('create');
-    await rowActions.nth(1).selectOption('create');
+    await expect(rowActions.nth(1)).toHaveValue('skip');
+    await expect(rowActions.nth(1).locator('option[value="create"]')).toHaveCount(0);
 
     await page.getByRole('button', { name: 'Confirm Import' }).click();
-    await expect(page.getByText(/Import failed/)).toBeVisible();
-
-    // A failed commit leaves the modal open (only a successful import calls
-    // onClose) — dismiss it explicitly before navigating away.
-    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByText('Imported: 1 created, 0 updated, 1 skipped')).toBeVisible();
 
     await page.getByRole('button', { name: 'Applications', exact: true }).click();
     await waitForTrackerLoaded(page);
-    await expect(page.locator('table tbody tr', { hasText: company })).toHaveCount(0);
+    await expect(page.locator('table tbody tr', { hasText: company })).toHaveCount(1);
   });
 });
 

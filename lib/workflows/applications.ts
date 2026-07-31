@@ -1,6 +1,16 @@
 import type { PrismaClient } from '@prisma/client';
-import { addMinutes, subDays } from 'date-fns';
-import { computePersonalApplyByDate, deriveInitialStage, generateApplicationCode, generateNextAction, nextBusinessDay, type Priority } from '@/lib/recruiting';
+import { addMinutes } from 'date-fns';
+import {
+  computePersonalApplyByDate,
+  deriveInitialStage,
+  generateApplicationCode,
+  generateNextAction,
+  nextBusinessDay,
+  personalDateBeforeOfficialDate,
+  personalDeadlineBeforeInstant,
+  TERMINAL_STATUSES,
+  type Priority,
+} from '@/lib/recruiting';
 import { addUtcDays, parseDateOnly, parseDateTimeLocal, parseZonedDateTime, utcToday } from '@/lib/dates';
 import { assertActionAllowed, hasSubmittedApplication } from '@/lib/workflow-policy';
 import { validateEditApplicationNextActionDue } from '@/lib/schemas/workflows';
@@ -56,6 +66,8 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
   // stage can never drift out of sync, regardless of caller.
   status?: string;
   location?: string | null;
+  postingStatus?: string | null;
+  postingDate?: string | null;
   applicationDeadline?: string | null;
   dateFound?: string | null;
   notes?: string | null;
@@ -65,11 +77,24 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
   const initialStage = deriveInitialStage(initialStatus as Parameters<typeof deriveInitialStage>[0]);
   const dateFound = input.dateFound ? parseDateOnly(input.dateFound) ?? utcToday() : utcToday();
   const applicationDeadline = input.applicationDeadline ? parseDateOnly(input.applicationDeadline) : null;
+  const postingDate = input.postingDate ? parseDateOnly(input.postingDate) : null;
   // A personal apply-by deadline, generated from the priority-scaled rules
   // (see computePersonalApplyByDate) — distinct from applicationDeadline,
   // the employer's own official deadline, which is stored separately and
   // never overwritten by this.
-  const nextActionDue = computePersonalApplyByDate({ priority: input.priority as Priority, dateFound, applicationDeadline });
+  const nextActionDue = initialStatus === 'Not Applied' || initialStatus === 'Preparing'
+    ? computePersonalApplyByDate({
+      priority: input.priority as Priority,
+      dateFound,
+      applicationDeadline,
+      postingStatus: input.postingStatus,
+      postingDate,
+    })
+    : initialStatus === 'Applied'
+      ? addUtcDays(utcToday(), 7)
+      : (TERMINAL_STATUSES as readonly string[]).includes(initialStatus)
+        ? null
+        : null;
   const nextActionDueKind: 'date' | 'timestamp' = 'date';
 
   return prisma.$transaction(async (tx) => {
@@ -81,6 +106,8 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
       status: initialStatus,
       currentStage: initialStage,
       location: input.location ?? null,
+      postingStatus: input.postingStatus ?? null,
+      postingDate,
       applicationDeadline,
       dateFound,
       notes: input.notes ?? '',
@@ -142,7 +169,7 @@ export async function applyWorkflow(prisma: WorkflowPrisma, applicationId: strin
         dateApplied: payload.dateApplied ? parseDateOnly(payload.dateApplied) ?? new Date() : new Date(),
         resumeVersionId,
         emailUsed: payload.emailUsed ?? existing.emailUsed,
-        nextAction: 'Monitor application and email',
+        nextAction: 'Check email and candidate portal',
         // Default personal follow-up target: check email/portal in 7 days
         // (see the deadline-generation rules in lib/recruiting.ts) — an
         // explicit nextActionDue from the caller always overrides this.
@@ -182,7 +209,7 @@ export async function oaReceivedWorkflow(prisma: WorkflowPrisma, applicationId: 
   // Default personal completion target: 24 hours before the OA's own due
   // time (never the due instant itself) — gives a buffer instead of cutting
   // it exactly at the deadline. An explicit nextActionDue always overrides this.
-  const defaultNextActionDue = new Date(dueAt.getTime() - 24 * 60 * 60 * 1000);
+  const defaultNextActionDue = personalDeadlineBeforeInstant(dueAt, 24 * 60 * 60 * 1000);
   const nextActionDue = payload.nextActionDue ? parseZonedDateTime(payload.nextActionDue, payload.timezone) ?? defaultNextActionDue : defaultNextActionDue;
 
   return prisma.$transaction(async (tx) => {
@@ -308,7 +335,7 @@ export async function interviewReceivedWorkflow(prisma: WorkflowPrisma, applicat
         status,
         currentStage: stage,
         nextAction: `Prepare for ${stage}`,
-        nextActionDue: subDays(scheduledStart, 1),
+        nextActionDue: personalDeadlineBeforeInstant(scheduledStart, 24 * 60 * 60 * 1000),
         nextActionDueKind: 'timestamp',
       },
     });
@@ -372,7 +399,7 @@ export async function interviewCompletedWorkflow(prisma: WorkflowPrisma, applica
         currentStage: stage,
         nextAction: 'Follow up after interview',
         nextActionDue: followUpDate,
-        nextActionDueKind: payload.followUpDate ? 'date' : 'timestamp',
+        nextActionDueKind: 'date',
       },
     });
 
@@ -452,7 +479,7 @@ export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: strin
   // Default personal decision target: two days before the OFFICIAL decision
   // deadline (never the official deadline itself) — an explicit
   // nextActionDue always overrides this.
-  const defaultNextActionDue = addUtcDays(officialDecisionDeadline, -2);
+  const defaultNextActionDue = personalDateBeforeOfficialDate(officialDecisionDeadline, 2);
   const nextActionDue = payload.nextActionDue ? parseDateOnly(payload.nextActionDue) ?? defaultNextActionDue : defaultNextActionDue;
 
   return prisma.$transaction(async (tx) => {
@@ -461,7 +488,7 @@ export async function offerWorkflow(prisma: WorkflowPrisma, applicationId: strin
       data: {
         status: 'Offer',
         currentStage: 'Offer Received',
-        nextAction: 'Review, compare, and respond to offer',
+        nextAction: 'Review, compare and respond to offer',
         nextActionDue,
         nextActionDueKind: 'date',
         compensationSummary: payload.compensationSummary ?? existing.compensationSummary,
@@ -632,6 +659,7 @@ export async function editApplicationWorkflow(prisma: WorkflowPrisma, applicatio
   if ('eligibility' in payload && payload.eligibility !== undefined) record('eligibility', 'Eligibility', payload.eligibility);
   if ('sponsorship' in payload && payload.sponsorship !== undefined) record('sponsorship', 'Sponsorship', payload.sponsorship);
   if ('whyFit' in payload && payload.whyFit !== undefined) record('whyFit', 'Why this role fits', payload.whyFit);
+  if (payload.lastVerifiedAt !== undefined) record('lastVerifiedAt', 'Last verified date/time', payload.lastVerifiedAt ? parseDateTimeLocal(payload.lastVerifiedAt) : null);
   if ('nextAction' in payload && payload.nextAction !== undefined) record('nextAction', 'Personal next action', payload.nextAction);
   if ('notes' in payload && payload.notes !== undefined) record('notes', 'General notes', payload.notes);
 

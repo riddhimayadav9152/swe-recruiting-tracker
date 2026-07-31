@@ -16,13 +16,14 @@ import {
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const dbPath = path.resolve(projectRoot, 'data', 'import-commit-test.db');
-const databaseUrl = `file:${dbPath}`;
+const databaseUrl = 'file:../data/import-commit-test.db';
 
 const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 
 beforeAll(async () => {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), dbPath);
   execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
     cwd: projectRoot,
     env: { ...process.env, DATABASE_URL: databaseUrl },
@@ -68,7 +69,7 @@ describe('commitImportRow — create', () => {
     expect(application.status).toBe('Not Applied');
     expect(application.currentStage).toBe('Discovered');
     expect(application.applicationDeadline?.toISOString().slice(0, 10)).toBe('2026-08-15');
-    expect(application.nextActionDue?.toISOString().slice(0, 10)).toBe('2026-08-15');
+    expect(application.nextActionDue?.toISOString().slice(0, 10)).toBe('2026-08-07');
     expect(application.nextActionDueKind).toBe('date');
   });
 
@@ -85,8 +86,8 @@ describe('commitImportRow — create', () => {
     const application = await prisma.application.findUniqueOrThrow({ where: { id: outcome.applicationId } });
     expect(application.status).toBe('OA');
     expect(application.currentStage).toBe('Online Assessment');
-    // 9:00 AM EDT -> 13:00 UTC, not the Jan 1 application deadline.
-    expect(application.nextActionDue?.toISOString()).toBe('2026-08-15T13:00:00.000Z');
+    // Personal OA target is 24 hours before the official 9:00 AM EDT due time.
+    expect(application.nextActionDue?.toISOString()).toBe('2026-08-14T13:00:00.000Z');
     expect(application.nextActionDueKind).toBe('timestamp');
 
     const assessment = await prisma.assessment.findFirstOrThrow({ where: { applicationId: application.id } });
@@ -127,7 +128,7 @@ describe('commitImportRow — create', () => {
     expect(interview.timezone).toBe('America/Los_Angeles');
     // 2:00 PM PDT -> 21:00 UTC.
     expect(interview.scheduledStart?.toISOString()).toBe('2026-08-20T21:00:00.000Z');
-    expect(application.nextActionDue?.toISOString()).toBe('2026-08-20T21:00:00.000Z');
+    expect(application.nextActionDue?.toISOString()).toBe('2026-08-19T21:00:00.000Z');
   });
 
   it('downgrades an interview row missing its schedule to Applied and creates NO Interview record', async () => {
@@ -140,7 +141,7 @@ describe('commitImportRow — create', () => {
     expect(interviews).toHaveLength(0);
   });
 
-  it('creates an Offer-status row with a required Offer record and the decision deadline as the next-action-due', async () => {
+  it('creates an Offer-status row with a required Offer record and a two-day personal response deadline', async () => {
     const { data, fieldPresence } = normalize({
       Company: 'Acme', Role: 'Software Engineer', URL: 'https://acme.com/apply', Status: 'Offer',
       'Decision Deadline': '2026-09-01', Compensation: '$180k base',
@@ -150,7 +151,7 @@ describe('commitImportRow — create', () => {
     if (!outcome.ok) throw new Error('expected success');
 
     const application = await prisma.application.findUniqueOrThrow({ where: { id: outcome.applicationId } });
-    expect(application.nextActionDue?.toISOString().slice(0, 10)).toBe('2026-09-01');
+    expect(application.nextActionDue?.toISOString().slice(0, 10)).toBe('2026-08-30');
     expect(application.nextActionDueKind).toBe('date');
 
     const offer = await prisma.offer.findUniqueOrThrow({ where: { applicationId: application.id } });
@@ -352,7 +353,7 @@ describe('commitImportRow — update (field-presence-aware)', () => {
     const updated = await prisma.application.findUniqueOrThrow({ where: { id: existing.id } });
     expect(updated.status).toBe('OA');
     expect(updated.currentStage).toBe('Online Assessment');
-    expect(updated.nextActionDue?.toISOString()).toBe('2026-08-20T13:00:00.000Z');
+    expect(updated.nextActionDue?.toISOString()).toBe('2026-08-19T13:00:00.000Z');
     expect(updated.nextActionDueKind).toBe('timestamp');
 
     const assessment = await prisma.assessment.findFirstOrThrow({ where: { applicationId: existing.id } });

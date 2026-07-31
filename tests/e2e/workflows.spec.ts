@@ -28,10 +28,12 @@ const createOpportunity = async (page: Page, company: string) => {
 const openApplication = async (page: Page, company: string) => {
   await page.getByRole('button', { name: 'Applications', exact: true }).click();
   await waitForTrackerLoaded(page);
-  const alreadyOpen = await page.getByTestId('application-detail-drawer').filter({ hasText: company }).count();
-  if (!alreadyOpen) {
+  const drawer = page.getByTestId('application-detail-drawer').filter({ hasText: company });
+  if (!(await drawer.count())) {
     await page.locator('table tbody tr', { hasText: company }).click();
   }
+  await expect(drawer).toBeVisible();
+  await page.getByTestId('drawer-tab-actions').click();
 };
 
 // The drawer's Overview tab is where status details like offer/assessment

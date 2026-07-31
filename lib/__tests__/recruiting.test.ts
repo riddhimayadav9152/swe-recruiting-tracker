@@ -38,8 +38,8 @@ describe('recruiting helpers', () => {
   });
 
   it('suggests next actions from status', () => {
-    expect(generateNextAction('Applied')).toBe('Monitor application and email');
-    expect(generateNextAction('Offer')).toBe('Review, compare, and respond to offer');
+    expect(generateNextAction('Applied')).toBe('Check email and candidate portal');
+    expect(generateNextAction('Offer')).toBe('Review, compare and respond to offer');
   });
 
   it('flags deadlines that are urgent', () => {
@@ -120,7 +120,7 @@ describe('computePersonalApplyByDate', () => {
     // official deadline is only 3 days out (2026-07-04) — two days before
     // that (2026-07-02) is earlier, so it wins.
     const applicationDeadline = parseDateOnly('2026-07-04')!;
-    const result = computePersonalApplyByDate({ priority: 'P3', dateFound, applicationDeadline });
+    const result = computePersonalApplyByDate({ priority: 'P3', dateFound, applicationDeadline, today: dateFound });
     expect(result.toISOString().slice(0, 10)).toBe('2026-07-02');
   });
 
@@ -130,19 +130,27 @@ describe('computePersonalApplyByDate', () => {
     // candidate — the earlier of the two (2026-07-03) should still win,
     // and it must never exceed the official deadline itself either way.
     const applicationDeadline = parseDateOnly('2026-07-10')!;
-    const result = computePersonalApplyByDate({ priority: 'P0', dateFound, applicationDeadline });
+    const result = computePersonalApplyByDate({ priority: 'P0', dateFound, applicationDeadline, today: dateFound });
     expect(result.toISOString().slice(0, 10)).toBe('2026-07-03');
     expect(result.getTime()).toBeLessThanOrEqual(applicationDeadline.getTime());
   });
 
-  it('clamps to the official deadline itself when even the earlier candidate would land after it', () => {
-    // P3 -> dateFound + 14 days = 2026-07-15. Official deadline is
-    // 2026-07-05 (before that), so two-days-before (2026-07-03) applies —
-    // but if the official deadline were EARLIER than dateFound itself, the
-    // result must still never exceed it.
+  it('clamps a near future official deadline to today when the two-day buffer has already passed', () => {
     const applicationDeadline = parseDateOnly('2026-07-02')!;
-    const result = computePersonalApplyByDate({ priority: 'P3', dateFound: parseDateOnly('2026-07-01')!, applicationDeadline });
-    expect(result.getTime()).toBeLessThanOrEqual(applicationDeadline.getTime());
+    const result = computePersonalApplyByDate({ priority: 'P3', dateFound, applicationDeadline, today: parseDateOnly('2026-07-01')! });
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-01');
+  });
+
+  it('preserves a past official deadline as an overdue personal deadline', () => {
+    const applicationDeadline = parseDateOnly('2026-07-02')!;
+    const result = computePersonalApplyByDate({ priority: 'P3', dateFound, applicationDeadline, today: parseDateOnly('2026-07-10')! });
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-02');
+  });
+
+  it('does not generate an apply-by date before the date found unless the official deadline is already past', () => {
+    const applicationDeadline = parseDateOnly('2026-07-03')!;
+    const result = computePersonalApplyByDate({ priority: 'P3', dateFound: parseDateOnly('2026-07-02')!, applicationDeadline, today: parseDateOnly('2026-07-02')! });
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-02');
   });
 });
 

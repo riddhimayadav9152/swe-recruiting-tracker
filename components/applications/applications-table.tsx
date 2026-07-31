@@ -210,14 +210,19 @@ export function ApplicationsTable({
                     </button>
                   </div>
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
+                    <div><dt className="text-slate-500">Candidate status</dt><dd>{selectedApp.status}</dd></div>
+                    <div><dt className="text-slate-500">Current stage</dt><dd>{selectedApp.currentStage ?? '—'}</dd></div>
+                    <div><dt className="text-slate-500">Job ID</dt><dd>{selectedApp.jobId ?? '—'}</dd></div>
                     <div><dt className="text-slate-500">Priority</dt><dd>{selectedApp.priority}</dd></div>
                     <div><dt className="text-slate-500">Location</dt><dd>{selectedApp.location ?? '—'}</dd></div>
                     <div><dt className="text-slate-500">Work model</dt><dd>{selectedApp.workModel ?? '—'}</dd></div>
                     <div><dt className="text-slate-500">Posting status</dt><dd>{selectedApp.postingStatus ?? '—'}</dd></div>
+                    <div><dt className="text-slate-500">Posting date</dt><dd>{formatDateOnly(selectedApp.postingDate)}</dd></div>
                     <div><dt className="text-slate-500">Date found</dt><dd>{formatDateOnly(selectedApp.dateFound)}</dd></div>
                     <div><dt className="text-slate-500">Official deadline</dt><dd>{formatDateOnly(selectedApp.applicationDeadline)}</dd></div>
                     <div><dt className="text-slate-500">My personal next action</dt><dd>{selectedApp.nextAction ?? '—'}</dd></div>
                     <div><dt className="text-slate-500">My due date</dt><dd>{selectedApp.nextActionDue ? formatByKind(selectedApp.nextActionDue, selectedApp.nextActionDueKind) : '—'}</dd></div>
+                    <div><dt className="text-slate-500">Last verified</dt><dd>{formatTimestamp(selectedApp.lastVerifiedAt)}</dd></div>
                     <div><dt className="text-slate-500">Compensation</dt><dd>{selectedApp.compensationSummary ?? '—'}</dd></div>
                     {selectedApp.dateApplied && (
                       <div><dt className="text-slate-500">Date applied</dt><dd data-testid="date-applied">{formatDateOnly(selectedApp.dateApplied)}</dd></div>

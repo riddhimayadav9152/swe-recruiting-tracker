@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import type { Prisma, PrismaClient } from '@prisma/client';
-import { isDateOnlyString, isDateTimeLocalString, parseDateOnly, parseDateTimeLocal } from '@/lib/dates';
+import { addUtcDays, isDateOnlyString, isDateTimeLocalString, parseDateOnly, parseDateTimeLocal, utcToday } from '@/lib/dates';
 import {
   computePersonalApplyByDate, deriveInitialStage, generateApplicationCode, generateNextAction,
-  postingStatuses, priorities, statuses, type ApplicationStatus, type Priority,
+  personalDateBeforeOfficialDate, postingStatuses, priorities, statuses, TERMINAL_STATUSES, type ApplicationStatus,
 } from '@/lib/recruiting';
 import { findDuplicateApplication, isUniqueConstraintError, type DuplicateMatchCandidate } from '@/lib/import';
 import { linkCategories } from '@/lib/schemas/workflows';
@@ -27,6 +27,9 @@ const nullableString = () => z.string().nullable().optional().transform((v) => v
 
 const nullableDateOnly = (message: string) =>
   z.string().nullable().optional().transform((v) => v ?? null).refine((v) => v === null || isDateOnlyString(v), message);
+
+const nullableTimestamp = (message: string) =>
+  z.string().nullable().optional().transform((v) => v ?? null).refine((v) => v === null || isDateTimeLocalString(v), message);
 
 const linkImportSchema = z.object({
   label: z.string().trim().min(1, 'label is required'),
@@ -60,6 +63,7 @@ export const applicationImportSchema = z.object({
   eligibility: nullableString(),
   sponsorship: nullableString(),
   whyFit: nullableString(),
+  lastVerifiedAt: nullableTimestamp('lastVerifiedAt must be a real timestamp'),
   notes: nullableString(),
   links: z.array(linkImportSchema).optional().default([]),
 }).superRefine((data, ctx) => {
@@ -111,6 +115,53 @@ function validateDocumentShape(raw: unknown): { ok: true; applications: unknown[
 }
 
 const normalizeKey = (value: string | null | undefined) => (value ?? '').trim().toLowerCase();
+
+const isAdvancedWorkflowStatus = (status: string): boolean =>
+  !['Not Applied', 'Preparing'].includes(status) && !(TERMINAL_STATUSES as readonly string[]).includes(status);
+
+const hasOwn = (value: unknown, key: string): boolean =>
+  typeof value === 'object' && value !== null && Object.prototype.hasOwnProperty.call(value, key);
+
+const deriveJsonImportDeadline = (
+  data: ApplicationImportRow,
+  status: ApplicationStatus,
+  applicationDeadline: Date | null,
+): { nextActionDue: Date | null; nextActionDueKind: 'date' | 'timestamp' } => {
+  if (data.nextActionDue) {
+    const nextActionDueKind = data.nextActionDueKind ?? 'date';
+    return {
+      nextActionDue: nextActionDueKind === 'date' ? parseDateOnly(data.nextActionDue) : parseDateTimeLocal(data.nextActionDue),
+      nextActionDueKind,
+    };
+  }
+
+  if (status === 'Not Applied' || status === 'Preparing') {
+    return {
+      nextActionDue: computePersonalApplyByDate({
+        priority: data.priority,
+        dateFound: data.dateFound ? parseDateOnly(data.dateFound) : null,
+        applicationDeadline,
+        postingStatus: data.postingStatus,
+        postingDate: data.postingDate ? parseDateOnly(data.postingDate) : null,
+      }),
+      nextActionDueKind: 'date',
+    };
+  }
+
+  if (status === 'Applied') {
+    return { nextActionDue: addUtcDays(utcToday(), 7), nextActionDueKind: 'date' };
+  }
+
+  if (status === 'Offer' && applicationDeadline) {
+    return { nextActionDue: personalDateBeforeOfficialDate(applicationDeadline, 2), nextActionDueKind: 'date' };
+  }
+
+  if ((TERMINAL_STATUSES as readonly string[]).includes(status)) {
+    return { nextActionDue: null, nextActionDueKind: 'date' };
+  }
+
+  return { nextActionDue: null, nextActionDueKind: 'date' };
+};
 
 export function previewJsonImport(raw: unknown, existingApplications: DuplicateMatchCandidate[]): JsonImportPreviewResult {
   const shape = validateDocumentShape(raw);
@@ -208,18 +259,7 @@ async function writeJsonImportRow(
   const dateFound = data.dateFound ? parseDateOnly(data.dateFound) : null;
   const applicationDeadline = data.applicationDeadline ? parseDateOnly(data.applicationDeadline) : null;
 
-  let nextActionDue: Date | null;
-  let nextActionDueKind: 'date' | 'timestamp';
-  if (data.nextActionDue) {
-    nextActionDueKind = data.nextActionDueKind ?? 'date';
-    nextActionDue = nextActionDueKind === 'date' ? parseDateOnly(data.nextActionDue) : parseDateTimeLocal(data.nextActionDue);
-  } else if (status === 'Not Applied' || status === 'Preparing') {
-    nextActionDue = computePersonalApplyByDate({ priority: data.priority as Priority, dateFound, applicationDeadline, postingStatus: data.postingStatus, postingDate: data.postingDate ? parseDateOnly(data.postingDate) : null });
-    nextActionDueKind = 'date';
-  } else {
-    nextActionDue = applicationDeadline;
-    nextActionDueKind = 'date';
-  }
+  const { nextActionDue, nextActionDueKind } = deriveJsonImportDeadline(data, status, applicationDeadline);
 
   const applicationData = {
     company: data.company,
@@ -252,19 +292,71 @@ async function writeJsonImportRow(
 
   if (decision.action === 'update') {
     if (!decision.matchedApplicationId) throw new Error(`Row ${decision.index}: no matching existing application to update`);
-    const current = await tx.application.findUnique({ where: { id: decision.matchedApplicationId }, select: { id: true, company: true, role: true, applicationUrl: true } });
+    const current = await tx.application.findUnique({
+      where: { id: decision.matchedApplicationId },
+      select: { id: true, company: true, role: true, applicationUrl: true, status: true },
+    });
     if (!current) throw new Error(`Row ${decision.index}: the matched application no longer exists`);
     const sameUrl = current.applicationUrl && normalizeKey(current.applicationUrl) === normalizeKey(data.applicationUrl);
     const sameCompanyRole = normalizeKey(current.company) === normalizeKey(data.company) && normalizeKey(current.role) === normalizeKey(data.role);
     if (!sameUrl && !sameCompanyRole) throw new Error(`Row ${decision.index}: the matched application no longer matches this row — it may have changed since preview`);
 
-    await tx.application.update({ where: { id: decision.matchedApplicationId }, data: applicationData });
-    await tx.applicationLink.deleteMany({ where: { applicationId: decision.matchedApplicationId } });
+    const raw = decision.data;
+    const advancedExisting = isAdvancedWorkflowStatus(current.status);
+    const updateData: Prisma.ApplicationUpdateInput = {};
+    const maybeSet = <K extends keyof Prisma.ApplicationUpdateInput>(rawKey: string, dbKey: K, value: Prisma.ApplicationUpdateInput[K]) => {
+      if (!hasOwn(raw, rawKey)) return;
+      updateData[dbKey] = value;
+    };
+
+    maybeSet('company', 'company', data.company);
+    maybeSet('role', 'role', data.role);
+    maybeSet('jobId', 'jobId', data.jobId);
+    maybeSet('applicationUrl', 'applicationUrl', data.applicationUrl);
+    maybeSet('candidatePortalUrl', 'candidatePortalUrl', data.candidatePortalUrl);
+    maybeSet('priority', 'priority', data.priority);
+    maybeSet('postingStatus', 'postingStatus', data.postingStatus);
+    maybeSet('location', 'location', data.location);
+    maybeSet('workModel', 'workModel', data.workModel);
+    maybeSet('postingDate', 'postingDate', data.postingDate ? parseDateOnly(data.postingDate) : null);
+    maybeSet('applicationDeadline', 'applicationDeadline', applicationDeadline);
+    maybeSet('dateFound', 'dateFound', dateFound);
+    maybeSet('loginEmail', 'emailUsed', data.loginEmail);
+    maybeSet('portalUsername', 'portalUsername', data.portalUsername);
+    maybeSet('passwordManagerReference', 'passwordManagerReference', data.passwordManagerReference);
+    maybeSet('confirmationNumber', 'confirmationNumber', data.confirmationNumber);
+    maybeSet('compensationSummary', 'compensationSummary', data.compensationSummary);
+    maybeSet('eligibility', 'eligibility', data.eligibility);
+    maybeSet('sponsorship', 'sponsorship', data.sponsorship);
+    maybeSet('whyFit', 'whyFit', data.whyFit);
+    maybeSet('lastVerifiedAt', 'lastVerifiedAt', hasOwn(raw, 'lastVerifiedAt') ? (data.lastVerifiedAt ? parseDateTimeLocal(data.lastVerifiedAt) : null) : undefined);
+    maybeSet('notes', 'notes', data.notes);
+    if (!advancedExisting) {
+      maybeSet('nextAction', 'nextAction', data.nextAction);
+      if (hasOwn(raw, 'nextActionDue')) {
+        updateData.nextActionDue = nextActionDue;
+        updateData.nextActionDueKind = nextActionDueKind;
+      }
+    }
+
+    if (Object.keys(updateData).length) {
+      await tx.application.update({ where: { id: decision.matchedApplicationId }, data: updateData });
+    }
+
+    const existingLinks = await tx.applicationLink.findMany({ where: { applicationId: decision.matchedApplicationId } });
     for (const link of data.links) {
-      await tx.applicationLink.create({ data: { applicationId: decision.matchedApplicationId, label: link.label, url: link.url, category: link.category, notes: link.notes } });
+      const matching = existingLinks.find((existingLink) => normalizeKey(existingLink.url) === normalizeKey(link.url));
+      if (matching) {
+        await tx.applicationLink.update({
+          where: { id: matching.id },
+          data: { label: link.label, category: link.category, notes: link.notes },
+        });
+      } else {
+        await tx.applicationLink.create({ data: { applicationId: decision.matchedApplicationId, label: link.label, url: link.url, category: link.category, notes: link.notes } });
+      }
     }
     await tx.activity.create({
-      data: { applicationId: decision.matchedApplicationId, eventType: 'Imported (JSON, updated)', summary: `Updated ${data.company} — ${data.role} via JSON import`, metadataJson: JSON.stringify({ source: 'json-import' }) },
+      data: { applicationId: decision.matchedApplicationId, eventType: 'JSON import updated', summary: `Updated ${data.company} — ${data.role} via JSON import`, metadataJson: JSON.stringify({ source: 'json-import' }) },
     });
     return { applicationId: decision.matchedApplicationId, action: 'update' };
   }
@@ -284,7 +376,7 @@ async function writeJsonImportRow(
     application = await tx.application.create({ data: { applicationCode, ...applicationData } });
   } catch (error) {
     if (!isUniqueConstraintError(error)) throw error;
-    const fallbackCode = generateApplicationCode(data.company, data.role, new Date(), existingCodes);
+    const fallbackCode = generateApplicationCode(data.company, data.role, new Date(), [...existingCodes, applicationCode]);
     application = await tx.application.create({ data: { applicationCode: fallbackCode, ...applicationData } });
   }
   existingCodes.push(application.applicationCode);
@@ -294,7 +386,7 @@ async function writeJsonImportRow(
   }
 
   await tx.activity.create({
-    data: { applicationId: application.id, eventType: 'Imported (JSON)', summary: `Imported ${data.company} — ${data.role} via JSON import`, metadataJson: JSON.stringify({ source: 'json-import' }) },
+    data: { applicationId: application.id, eventType: 'JSON import created', summary: `Imported ${data.company} — ${data.role} via JSON import`, metadataJson: JSON.stringify({ source: 'json-import' }) },
   });
 
   return { applicationId: application.id, action: 'create' };

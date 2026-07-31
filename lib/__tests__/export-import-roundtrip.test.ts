@@ -11,7 +11,7 @@ const projectRoot = path.resolve(__dirname, '..', '..');
 
 function makeTestDb(name: string) {
   const dbPath = path.resolve(projectRoot, 'data', name);
-  const databaseUrl = `file:${dbPath}`;
+  const databaseUrl = `file:../data/${name}`;
   return { dbPath, databaseUrl, prisma: new PrismaClient({ datasources: { db: { url: databaseUrl } } }) };
 }
 
@@ -26,11 +26,30 @@ function pushSchema(databaseUrl: string) {
   });
 }
 
+async function clearDatabase(prisma: PrismaClient) {
+  await prisma.$transaction([
+    prisma.activity.deleteMany(),
+    prisma.note.deleteMany(),
+    prisma.contact.deleteMany(),
+    prisma.jobDescription.deleteMany(),
+    prisma.applicationLink.deleteMany(),
+    prisma.assessment.deleteMany(),
+    prisma.interview.deleteMany(),
+    prisma.offer.deleteMany(),
+    prisma.document.deleteMany(),
+    prisma.application.deleteMany(),
+    prisma.resumeVersion.deleteMany(),
+    prisma.userProfile.deleteMany(),
+  ]);
+}
+
 beforeAll(async () => {
-  for (const { dbPath, databaseUrl } of [source, target]) {
+  for (const { dbPath, databaseUrl, prisma } of [source, target]) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), dbPath);
     pushSchema(databaseUrl);
+    await clearDatabase(prisma);
   }
 });
 
@@ -340,7 +359,9 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     const clean = makeTestDb('roundtrip-orphan-test.db');
     fs.mkdirSync(path.dirname(clean.dbPath), { recursive: true });
     if (fs.existsSync(clean.dbPath)) fs.unlinkSync(clean.dbPath);
+    fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), clean.dbPath);
     pushSchema(clean.databaseUrl);
+    await clearDatabase(clean.prisma);
 
     try {
       const exportData = await loadExportData(clean.prisma);

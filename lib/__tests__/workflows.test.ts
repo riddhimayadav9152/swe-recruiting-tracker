@@ -1,7 +1,7 @@
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { subDays } from 'date-fns';
 import { parseZonedDateTime } from '../dates';
@@ -26,13 +26,14 @@ import {
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const dbPath = path.resolve(projectRoot, 'data', 'workflow-test.db');
-const databaseUrl = `file:${dbPath}`;
+const databaseUrl = 'file:../data/workflow-test.db';
 
 const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 
 beforeAll(async () => {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), dbPath);
   execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
     cwd: projectRoot,
     env: { ...process.env, DATABASE_URL: databaseUrl },
@@ -194,7 +195,7 @@ describe('workflow services', () => {
     // it, since parseZonedDateTime treats the digits as wall-clock time in
     // the target zone regardless of any "Z"/offset already present.
     const timezone = 'America/New_York';
-    const scheduledStartLocal = '2026-07-26T14:00:00';
+    const scheduledStartLocal = '2099-07-26T14:00:00';
     const expectedUtcStart = parseZonedDateTime(scheduledStartLocal, timezone)!;
 
     await interviewReceivedWorkflow(prisma, application.id, {
@@ -259,6 +260,27 @@ describe('workflow services', () => {
     expect(updatedFirst.completedAt).toBeTruthy();
     expect(updatedFirst.result).toBe('Passed');
     expect(updatedSecond.completedAt).toBeNull();
+  });
+
+  it('stores a generated interview-completion follow-up as a date deadline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-31T12:00:00.000Z'));
+    try {
+      const application = await createAppliedApplication();
+      await prisma.application.update({ where: { id: application.id }, data: { status: 'Recruiter Screen' } });
+      const interview = await prisma.interview.create({ data: { applicationId: application.id, stage: 'Recruiter Screen', scheduledStart: new Date('2026-07-31T14:00:00.000Z') } });
+
+      const updated = await interviewCompletedWorkflow(prisma, application.id, {
+        action: 'interviewCompleted',
+        interviewId: interview.id,
+        completedAt: '2026-07-31T15:00:00',
+      });
+
+      expect(updated.nextActionDue?.toISOString().slice(0, 10)).toBe('2026-08-03');
+      expect(updated.nextActionDueKind).toBe('date');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects completing an interview that is already completed', async () => {
@@ -598,6 +620,63 @@ describe('workflow services', () => {
     const updated = await prisma.application.findUniqueOrThrow({ where: { id: application.id } });
     const expectedNextActionDue = new Date(new Date(expectedUtc).getTime() - 24 * 60 * 60 * 1000).toISOString();
     expect(updated.nextActionDue?.toISOString()).toBe(expectedNextActionDue);
+  });
+
+  it('clamps a short-notice OA personal deadline to now', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-14T18:00:00.000Z'));
+    try {
+      const application = await createAppliedApplication();
+
+      const updated = await oaReceivedWorkflow(prisma, application.id, {
+        action: 'oaReceived',
+        dueAt: '2026-08-15T09:00:00',
+        timezone: 'America/New_York',
+      });
+
+      expect(updated.nextActionDue?.toISOString()).toBe('2026-08-14T18:00:00.000Z');
+      expect(updated.nextActionDueKind).toBe('timestamp');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clamps a short-notice interview preparation deadline to now', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-14T18:00:00.000Z'));
+    try {
+      const application = await createAppliedApplication();
+
+      const updated = await interviewReceivedWorkflow(prisma, application.id, {
+        action: 'interviewReceived',
+        stage: 'Technical Interview',
+        scheduledStart: '2026-08-15T09:00:00',
+        timezone: 'America/New_York',
+      });
+
+      expect(updated.nextActionDue?.toISOString()).toBe('2026-08-14T18:00:00.000Z');
+      expect(updated.nextActionDueKind).toBe('timestamp');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clamps a short-notice offer response deadline to today', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-14T18:00:00.000Z'));
+    try {
+      const application = await createAppliedApplication();
+
+      const updated = await offerWorkflow(prisma, application.id, {
+        action: 'offer',
+        decisionDeadline: '2026-08-15',
+      });
+
+      expect(updated.nextActionDue?.toISOString().slice(0, 10)).toBe('2026-08-14');
+      expect(updated.nextActionDueKind).toBe('date');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -14,13 +14,14 @@ import type { DuplicateMatchCandidate } from '../import';
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const dbPath = path.resolve(projectRoot, 'data', 'json-import-test.db');
-const databaseUrl = `file:${dbPath}`;
+const databaseUrl = 'file:../data/json-import-test.db';
 
 const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 
 beforeAll(async () => {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), dbPath);
   execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
     cwd: projectRoot,
     env: { ...process.env, DATABASE_URL: databaseUrl },
@@ -31,8 +32,15 @@ beforeAll(async () => {
 beforeEach(async () => {
   await prisma.$transaction([
     prisma.activity.deleteMany(),
+    prisma.assessment.deleteMany(),
+    prisma.interview.deleteMany(),
+    prisma.contact.deleteMany(),
+    prisma.note.deleteMany(),
     prisma.applicationLink.deleteMany(),
+    prisma.jobDescription.deleteMany(),
+    prisma.offer.deleteMany(),
     prisma.application.deleteMany(),
+    prisma.resumeVersion.deleteMany(),
   ]);
 });
 
@@ -306,7 +314,7 @@ describe('commitJsonImportBatch — create', () => {
     expect(links[0].label).toBe('Careers');
 
     const activities = await prisma.activity.findMany({ where: { applicationId } });
-    expect(activities.map((a) => a.eventType)).toContain('Imported (JSON)');
+    expect(activities.map((a) => a.eventType)).toContain('JSON import created');
   });
 
   it('computes nextActionDue using the personal-deadline rules when not supplied, for a Not Applied/Preparing row', async () => {
@@ -343,7 +351,7 @@ describe('commitJsonImportBatch — update', () => {
     },
   });
 
-  it('updates the matched application, replaces its links, and records an activity', async () => {
+  it('updates the matched application, preserves existing links, merges incoming links, and records an activity', async () => {
     const existing = await seedExisting();
     await prisma.applicationLink.create({ data: { applicationId: existing.id, label: 'Old link', url: 'https://old.example.com' } });
 
@@ -366,11 +374,51 @@ describe('commitJsonImportBatch — update', () => {
     expect(updated.compensationSummary).toBe('$200k');
 
     const links = await prisma.applicationLink.findMany({ where: { applicationId: existing.id } });
-    expect(links).toHaveLength(1);
-    expect(links[0].label).toBe('New link');
+    expect(links).toHaveLength(2);
+    expect(links.map((link) => link.label).sort()).toEqual(['New link', 'Old link']);
 
     const activities = await prisma.activity.findMany({ where: { applicationId: existing.id } });
-    expect(activities.map((a) => a.eventType)).toContain('Imported (JSON, updated)');
+    expect(activities.map((a) => a.eventType)).toContain('JSON import updated');
+  });
+
+  it('preserves advanced workflow status and workflow-derived next action during a recommendation update', async () => {
+    const existing = await seedExisting();
+    await prisma.application.update({
+      where: { id: existing.id },
+      data: {
+        status: 'OA',
+        currentStage: 'Online Assessment',
+        nextAction: 'Prepare for and complete OA',
+        nextActionDue: new Date('2026-08-10T12:00:00.000Z'),
+        nextActionDueKind: 'timestamp',
+      },
+    });
+
+    const decisions: JsonImportRowDecision[] = [{
+      index: 0,
+      action: 'update',
+      matchedApplicationId: existing.id,
+      data: baseApplication({
+        status: 'Not Applied',
+        priority: 'P0',
+        nextAction: 'Apply now',
+        nextActionDue: '2026-07-31',
+        nextActionDueKind: 'date',
+        eligibility: 'Metadata enrichment',
+      }),
+    }];
+
+    const summary = await commitJsonImportBatch(prisma, decisions);
+    expect(summary.updated).toBe(1);
+
+    const updated = await prisma.application.findUniqueOrThrow({ where: { id: existing.id } });
+    expect(updated.status).toBe('OA');
+    expect(updated.currentStage).toBe('Online Assessment');
+    expect(updated.nextAction).toBe('Prepare for and complete OA');
+    expect(updated.nextActionDue?.toISOString()).toBe('2026-08-10T12:00:00.000Z');
+    expect(updated.nextActionDueKind).toBe('timestamp');
+    expect(updated.priority).toBe('P0');
+    expect(updated.eligibility).toBe('Metadata enrichment');
   });
 
   it('fails when matchedApplicationId is missing', async () => {

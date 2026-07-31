@@ -137,7 +137,20 @@ export default function TrackerShell() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showJsonImportModal, setShowJsonImportModal] = useState(false);
   const [quickAction, setQuickAction] = useState<QuickAction>('apply');
-  const [newForm, setNewForm] = useState({ company:'', role:'', applicationUrl:'', priority:'P2', status:'Not Applied', location:'', notes:'' });
+  const emptyNewForm = {
+    company: '',
+    role: '',
+    applicationUrl: '',
+    priority: 'P2',
+    status: 'Not Applied',
+    location: '',
+    applicationDeadline: '',
+    dateFound: '',
+    postingStatus: 'Open',
+    postingDate: '',
+    notes: '',
+  };
+  const [newForm, setNewForm] = useState(emptyNewForm);
   const [quickForm, setQuickForm] = useState<Record<string, string>>({});
   const [quickErrors, setQuickErrors] = useState<Record<string, string[] | undefined>>({});
   const [pendingOverride, setPendingOverride] = useState(false);
@@ -296,7 +309,7 @@ export default function TrackerShell() {
       const created = await response.json();
       toast.success('Opportunity created');
       setShowNewModal(false);
-      setNewForm({ company:'', role:'', applicationUrl:'', priority:'P2', status:'Not Applied', location:'', notes:'' });
+      setNewForm(emptyNewForm);
       await loadData();
       setSelectedAppId(created.id);
     } else {
@@ -1266,6 +1279,16 @@ export default function TrackerShell() {
               </select>
               <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="location">Location</label>
               <input id="location" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Location" value={newForm.location} onChange={(e) => setNewForm({ ...newForm, location: e.target.value })} />
+              <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="posting-status">Posting status</label>
+              <select id="posting-status" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={newForm.postingStatus} onChange={(e) => setNewForm({ ...newForm, postingStatus: e.target.value })}>
+                <option value="Open">Open</option><option value="Opening Soon">Opening Soon</option><option value="Closed">Closed</option><option value="Unknown">Unknown</option>
+              </select>
+              <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="posting-date">Posting date</label>
+              <input id="posting-date" type="date" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={newForm.postingDate} onChange={(e) => setNewForm({ ...newForm, postingDate: e.target.value })} />
+              <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="date-found">Date found</label>
+              <input id="date-found" type="date" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={newForm.dateFound} onChange={(e) => setNewForm({ ...newForm, dateFound: e.target.value })} />
+              <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="official-deadline">Official deadline</label>
+              <input id="official-deadline" type="date" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={newForm.applicationDeadline} onChange={(e) => setNewForm({ ...newForm, applicationDeadline: e.target.value })} />
               <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="notes">Notes</label>
               <textarea id="notes" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Notes" rows={3} value={newForm.notes} onChange={(e) => setNewForm({ ...newForm, notes: e.target.value })} />
               <div className="flex justify-end gap-2">

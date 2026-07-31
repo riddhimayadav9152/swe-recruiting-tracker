@@ -10,7 +10,7 @@ type EditFormState = {
   applicationUrl: string; candidatePortalUrl: string; emailUsed: string; portalUsername: string;
   passwordManagerReference: string; confirmationNumber: string; compensationSummary: string;
   eligibility: string; sponsorship: string; whyFit: string; nextAction: string; nextActionDue: string;
-  nextActionDueKind: 'date' | 'timestamp'; notes: string;
+  nextActionDueKind: 'date' | 'timestamp'; lastVerifiedAt: string; notes: string;
 };
 
 const toFormState = (app: ApplicationRecord): EditFormState => ({
@@ -21,6 +21,7 @@ const toFormState = (app: ApplicationRecord): EditFormState => ({
   portalUsername: app.portalUsername ?? '', passwordManagerReference: app.passwordManagerReference ?? '',
   confirmationNumber: app.confirmationNumber ?? '', compensationSummary: app.compensationSummary ?? '',
   eligibility: app.eligibility ?? '', sponsorship: app.sponsorship ?? '', whyFit: app.whyFit ?? '',
+  lastVerifiedAt: app.lastVerifiedAt?.slice(0, 16) ?? '',
   nextAction: app.nextAction ?? '', nextActionDue: app.nextActionDueKind === 'date' ? (app.nextActionDue?.slice(0, 10) ?? '') : (app.nextActionDue?.slice(0, 16) ?? ''),
   nextActionDueKind: app.nextActionDueKind, notes: app.notes ?? '',
 });
@@ -47,7 +48,7 @@ export function EditApplicationModal({ application, onClose, onSaved }: { applic
         emailUsed: form.emailUsed || null, portalUsername: form.portalUsername || null,
         passwordManagerReference: form.passwordManagerReference || null, confirmationNumber: form.confirmationNumber || null,
         compensationSummary: form.compensationSummary || null, eligibility: form.eligibility || null,
-        sponsorship: form.sponsorship || null, whyFit: form.whyFit || null, nextAction: form.nextAction || null,
+        sponsorship: form.sponsorship || null, whyFit: form.whyFit || null, lastVerifiedAt: form.lastVerifiedAt || null, nextAction: form.nextAction || null,
         nextActionDue: form.nextActionDue || null, nextActionDueKind: form.nextActionDueKind, notes: form.notes || null,
       };
       const response = await fetch(`/api/applications/${application.id}`, {
@@ -105,6 +106,7 @@ export function EditApplicationModal({ application, onClose, onSaved }: { applic
           <label className={`${label} sm:col-span-2`}>Eligibility<textarea className={field} rows={2} value={form.eligibility} onChange={(e) => set('eligibility', e.target.value)} /></label>
           <label className={`${label} sm:col-span-2`}>Sponsorship<textarea className={field} rows={2} value={form.sponsorship} onChange={(e) => set('sponsorship', e.target.value)} /></label>
           <label className={`${label} sm:col-span-2`}>Why this role fits<textarea className={field} rows={2} value={form.whyFit} onChange={(e) => set('whyFit', e.target.value)} /></label>
+          <label className={label}>Last verified date/time<input type="datetime-local" className={field} value={form.lastVerifiedAt} onChange={(e) => set('lastVerifiedAt', e.target.value)} /></label>
           <label className={label}>Personal next action<input className={field} value={form.nextAction} onChange={(e) => set('nextAction', e.target.value)} /></label>
           <div>
             <label className={label}>
