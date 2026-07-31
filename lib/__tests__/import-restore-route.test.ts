@@ -1,22 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
 import { PrismaClient } from '@prisma/client';
 import { EXPORT_FORMAT_VERSION, METADATA_SHEET_NAME, REQUIRED_SHEET_NAMES } from '../export-format';
+import { pushPrismaSchema, resetSqliteTestDatabaseFile } from '../../tests/helpers/test-database';
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const testDbPath = path.join(projectRoot, 'data', 'import-restore-route-test.db');
 const testDatabaseUrl = 'file:../data/import-restore-route-test.db';
-
-function pushSchema(databaseUrl: string) {
-  execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
-    cwd: projectRoot,
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-    stdio: 'pipe',
-  });
-}
 
 async function clearDatabase(databaseUrl: string) {
   const client = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
@@ -38,8 +30,8 @@ async function clearDatabase(databaseUrl: string) {
 }
 
 async function prepareTestDatabase(): Promise<string> {
-  fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), testDbPath);
-  pushSchema(testDatabaseUrl);
+  resetSqliteTestDatabaseFile(projectRoot, testDbPath);
+  pushPrismaSchema(projectRoot, testDatabaseUrl);
   await clearDatabase(testDatabaseUrl);
   return testDatabaseUrl;
 }

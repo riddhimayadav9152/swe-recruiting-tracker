@@ -1,11 +1,10 @@
-import { execFileSync } from 'child_process';
-import fs from 'fs';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as XLSX from 'xlsx';
 import { PrismaClient } from '@prisma/client';
 import { buildExportWorkbook, loadExportData } from '../export';
 import { commitMultiSheetImport, parseMultiSheetWorkbook } from '../multi-sheet-import';
+import { pushPrismaSchema, resetSqliteTestDatabaseFile } from '../../tests/helpers/test-database';
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 
@@ -17,14 +16,6 @@ function makeTestDb(name: string) {
 
 const source = makeTestDb('roundtrip-source-test.db');
 const target = makeTestDb('roundtrip-target-test.db');
-
-function pushSchema(databaseUrl: string) {
-  execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
-    cwd: projectRoot,
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-    stdio: 'pipe',
-  });
-}
 
 async function clearDatabase(prisma: PrismaClient) {
   await prisma.$transaction([
@@ -45,10 +36,8 @@ async function clearDatabase(prisma: PrismaClient) {
 
 beforeAll(async () => {
   for (const { dbPath, databaseUrl, prisma } of [source, target]) {
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-    fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), dbPath);
-    pushSchema(databaseUrl);
+    resetSqliteTestDatabaseFile(projectRoot, dbPath);
+    pushPrismaSchema(projectRoot, databaseUrl);
     await clearDatabase(prisma);
   }
 });
@@ -357,10 +346,8 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
 
   it('reports an unmatched Application Code and aborts the ENTIRE restore, writing nothing at all, instead of silently dropping the one row', async () => {
     const clean = makeTestDb('roundtrip-orphan-test.db');
-    fs.mkdirSync(path.dirname(clean.dbPath), { recursive: true });
-    if (fs.existsSync(clean.dbPath)) fs.unlinkSync(clean.dbPath);
-    fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), clean.dbPath);
-    pushSchema(clean.databaseUrl);
+    resetSqliteTestDatabaseFile(projectRoot, clean.dbPath);
+    pushPrismaSchema(projectRoot, clean.databaseUrl);
     await clearDatabase(clean.prisma);
 
     try {

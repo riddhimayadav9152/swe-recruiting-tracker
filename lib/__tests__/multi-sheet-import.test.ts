@@ -1,11 +1,10 @@
-import { execFileSync } from 'child_process';
-import fs from 'fs';
 import path from 'path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import * as XLSX from 'xlsx';
 import { PrismaClient } from '@prisma/client';
 import { commitMultiSheetImport, parseMultiSheetWorkbook, type MultiSheetWorkbookData, type ParsedMultiSheetWorkbook } from '../multi-sheet-import';
 import { EXPORT_FORMAT_VERSION, METADATA_SHEET_NAME, REQUIRED_SHEET_NAMES } from '../export-format';
+import { pushPrismaSchema, resetSqliteTestDatabaseFile } from '../../tests/helpers/test-database';
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 const dbPath = path.resolve(projectRoot, 'data', 'multi-sheet-import-test.db');
@@ -13,14 +12,8 @@ const databaseUrl = 'file:../data/multi-sheet-import-test.db';
 const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 
 beforeAll(async () => {
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-  fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), dbPath);
-  execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
-    cwd: projectRoot,
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-    stdio: 'pipe',
-  });
+  resetSqliteTestDatabaseFile(projectRoot, dbPath);
+  pushPrismaSchema(projectRoot, databaseUrl);
 });
 
 beforeEach(async () => {

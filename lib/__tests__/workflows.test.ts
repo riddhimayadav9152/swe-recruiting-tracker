@@ -1,10 +1,9 @@
-import { execFileSync } from 'child_process';
-import fs from 'fs';
 import path from 'path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { subDays } from 'date-fns';
 import { parseZonedDateTime } from '../dates';
+import { pushPrismaSchema, resetSqliteTestDatabaseFile } from '../../tests/helpers/test-database';
 import {
   applyWorkflow,
   contactWorkflow,
@@ -31,14 +30,8 @@ const databaseUrl = 'file:../data/workflow-test.db';
 const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 
 beforeAll(async () => {
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-  fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), dbPath);
-  execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
-    cwd: projectRoot,
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-    stdio: 'pipe',
-  });
+  resetSqliteTestDatabaseFile(projectRoot, dbPath);
+  pushPrismaSchema(projectRoot, databaseUrl);
 });
 
 beforeEach(async () => {

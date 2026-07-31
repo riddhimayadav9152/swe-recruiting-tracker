@@ -1,24 +1,13 @@
-import { execFileSync } from 'child_process';
-import fs from 'fs';
 import path from 'path';
 import { PrismaClient } from '@prisma/client';
 import { e2eDatabasePath, e2eDatabaseUrl } from './e2e-db';
+import { pushPrismaSchema, resetSqliteTestDatabaseFile } from '../helpers/test-database';
 
 export default async function globalSetup() {
   const projectRoot = path.resolve(__dirname, '..', '..');
 
-  fs.mkdirSync(path.dirname(e2eDatabasePath), { recursive: true });
-  for (const suffix of ['', '-journal', '-shm', '-wal']) {
-    const target = `${e2eDatabasePath}${suffix}`;
-    if (fs.existsSync(target)) fs.unlinkSync(target);
-  }
-  fs.copyFileSync(path.resolve(projectRoot, 'data', 'dev.db'), e2eDatabasePath);
-
-  execFileSync('npx', ['prisma', 'db', 'push', '--accept-data-loss', '--skip-generate'], {
-    cwd: projectRoot,
-    env: { ...process.env, DATABASE_URL: e2eDatabaseUrl },
-    stdio: 'inherit',
-  });
+  resetSqliteTestDatabaseFile(projectRoot, e2eDatabasePath);
+  pushPrismaSchema(projectRoot, e2eDatabaseUrl, 'inherit');
 
   const prisma = new PrismaClient({ datasources: { db: { url: e2eDatabaseUrl } } });
   await prisma.$transaction([
