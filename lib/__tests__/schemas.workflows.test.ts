@@ -57,8 +57,10 @@ describe('workflowPayloadSchema validates interview timezone and dates strictly'
     expect(workflowPayloadSchema.safeParse(offer).success).toBe(false);
   });
 
-  it('still requires resumeVersionId, dueAt, stage+scheduledStart, decisionDeadline, nonempty note content, and nonempty contact name', () => {
-    expect(workflowPayloadSchema.safeParse({ action: 'apply' }).success).toBe(false);
+  it('still requires dueAt, stage+scheduledStart, decisionDeadline, nonempty note content, and nonempty contact name (resumeVersionId is no longer required for apply)', () => {
+    // Resume tracking is no longer part of Mark Applied — an empty payload
+    // (no resumeVersionId at all) is now perfectly valid.
+    expect(workflowPayloadSchema.safeParse({ action: 'apply' }).success).toBe(true);
     expect(workflowPayloadSchema.safeParse({ action: 'oaReceived' }).success).toBe(false);
     expect(workflowPayloadSchema.safeParse({ action: 'interviewReceived', stage: 'Recruiter Screen' }).success).toBe(false);
     expect(workflowPayloadSchema.safeParse({ action: 'offer' }).success).toBe(false);

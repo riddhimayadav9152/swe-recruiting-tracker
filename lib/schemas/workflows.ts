@@ -58,10 +58,12 @@ const interviewStageSchema = z.enum(['Recruiter Screen', 'Technical Interview', 
 
 const applySchema = z.object({
   action: z.literal('apply'),
-  resumeVersionId: z.string().trim().min(1, 'Resume is required'),
+  // Resume tracking is no longer part of this workflow (the user manages
+  // resumes elsewhere) — accepted only for backward compatibility with any
+  // caller still sending one; Mark Applied itself never requires it.
+  resumeVersionId: z.string().trim().optional(),
   dateApplied: optionalDateOnlyString(),
   emailUsed: z.string().optional(),
-  coverLetterStatus: z.string().optional(),
   notes: z.string().optional(),
   nextActionDue: optionalDateTimeString(),
   override: z.boolean().optional(),
@@ -145,6 +147,9 @@ const offerSchema = z.object({
   decisionDeadline: requiredDateOnlyString('decisionDeadline is required'),
   compensationSummary: z.string().optional(),
   notes: z.string().optional(),
+  // The user's own personal decision target — defaults to two days before
+  // the official decisionDeadline above when not supplied (see offerWorkflow).
+  nextActionDue: optionalDateOnlyString(),
   override: z.boolean().optional(),
 });
 
@@ -180,12 +185,60 @@ const setApplicationDateSchema = z.object({
   confirmImportRepair: z.boolean().optional(),
 });
 
+// Fully editable base-record fields — everything EXCEPT status/currentStage,
+// which must only ever change through a workflow action (see the module
+// docstring on lib/workflow-policy.ts) so activity history stays
+// trustworthy. Every field here is optional: the client only sends the
+// fields the user actually changed, and `undefined` (as opposed to an
+// explicit `null`) means "leave this field alone" — see editApplicationWorkflow.
+export const editApplicationSchema = z.object({
+  action: z.literal('editApplication'),
+  company: z.string().trim().min(1, 'Company is required').optional(),
+  role: z.string().trim().min(1, 'Role is required').optional(),
+  jobId: z.string().nullable().optional(),
+  location: z.string().nullable().optional(),
+  workModel: z.string().nullable().optional(),
+  priority: z.enum(['P0', 'P1', 'P2', 'P3']).optional(),
+  postingStatus: z.enum(['Open', 'Opening Soon', 'Closed', 'Unknown']).nullable().optional(),
+  postingDate: optionalDateOnlyString().nullable(),
+  applicationDeadline: optionalDateOnlyString().nullable(),
+  dateFound: optionalDateOnlyString().nullable(),
+  applicationUrl: optionalUrlString().nullable(),
+  candidatePortalUrl: optionalUrlString().nullable(),
+  emailUsed: z.string().nullable().optional(),
+  portalUsername: z.string().nullable().optional(),
+  // Never an actual password — this is a REFERENCE to where the real
+  // credential lives (e.g. "1Password > Work > Acme"), never the credential
+  // itself. This app is an unencrypted local SQLite database.
+  passwordManagerReference: z.string().nullable().optional(),
+  confirmationNumber: z.string().nullable().optional(),
+  compensationSummary: z.string().nullable().optional(),
+  eligibility: z.string().nullable().optional(),
+  sponsorship: z.string().nullable().optional(),
+  whyFit: z.string().nullable().optional(),
+  nextAction: z.string().nullable().optional(),
+  nextActionDue: z.string().nullable().optional(),
+  nextActionDueKind: z.enum(['date', 'timestamp']).optional(),
+  notes: z.string().nullable().optional(),
+});
+
+/** editApplicationSchema can't carry a `.superRefine` itself (a discriminated union member must stay a plain ZodObject) — call this separately once `action === 'editApplication'` has narrowed the type. */
+export function validateEditApplicationNextActionDue(data: EditApplicationPayload): string | null {
+  if (!data.nextActionDue) return null;
+  const kind = data.nextActionDueKind ?? 'date';
+  const valid = kind === 'date' ? isDateOnlyString(data.nextActionDue) : isDateTimeLocalString(data.nextActionDue);
+  return valid ? null : `nextActionDue does not match its declared kind "${kind}"`;
+}
+
 const descriptionSchema = z.object({
   action: z.literal('description'),
   fullText: z.string().optional(),
+  sourceUrl: z.string().optional(),
+  keywords: z.string().optional(),
+  // Kept for backward compatibility with existing rows only — no longer
+  // surfaced in the visible Job Descriptions editor (see AGENTS item 9).
   minimumQualifications: z.string().optional(),
   preferredQualifications: z.string().optional(),
-  keywords: z.string().optional(),
 });
 
 export const workflowPayloadSchema = z.discriminatedUnion('action', [
@@ -200,6 +253,7 @@ export const workflowPayloadSchema = z.discriminatedUnion('action', [
   contactSchema,
   descriptionSchema,
   setApplicationDateSchema,
+  editApplicationSchema,
 ]);
 
 export type ApplyPayload = z.infer<typeof applySchema>;
@@ -213,4 +267,32 @@ export type NotePayload = z.infer<typeof noteSchema>;
 export type ContactPayload = z.infer<typeof contactSchema>;
 export type DescriptionPayload = z.infer<typeof descriptionSchema>;
 export type SetApplicationDatePayload = z.infer<typeof setApplicationDateSchema>;
+export type EditApplicationPayload = z.infer<typeof editApplicationSchema>;
 export type WorkflowPayload = z.infer<typeof workflowPayloadSchema>;
+
+// --- Notes: standalone edit/delete (create still goes through noteSchema above, via the 'note' workflow action) ---
+export const noteUpdateSchema = z.object({
+  category: z.string().optional(),
+  content: z.string().trim().min(1, 'content is required'),
+});
+export type NoteUpdatePayload = z.infer<typeof noteUpdateSchema>;
+
+// --- ApplicationLink: create/update ---
+export const linkCategories = ['Company', 'Role Research', 'Application', 'Interview Preparation', 'Recruiter', 'Other'] as const;
+
+export const linkCreateSchema = z.object({
+  applicationId: z.string().trim().min(1, 'applicationId is required'),
+  label: z.string().trim().min(1, 'label is required'),
+  url: z.string().trim().url('Enter a valid URL'),
+  category: z.enum(linkCategories).optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+export type LinkCreatePayload = z.infer<typeof linkCreateSchema>;
+
+export const linkUpdateSchema = z.object({
+  label: z.string().trim().min(1, 'label is required').optional(),
+  url: z.string().trim().url('Enter a valid URL').optional(),
+  category: z.enum(linkCategories).optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+export type LinkUpdatePayload = z.infer<typeof linkUpdateSchema>;

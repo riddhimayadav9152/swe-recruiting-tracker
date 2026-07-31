@@ -7,7 +7,7 @@ import packageJson from '../package.json';
  * from a workbook whose Metadata sheet declares a different version, rather
  * than guessing at how to interpret unfamiliar columns.
  */
-export const EXPORT_FORMAT_VERSION = 1;
+export const EXPORT_FORMAT_VERSION = 2;
 
 /** The app version that produced an export — informational (surfaced in the Metadata sheet and in restore error messages), not itself a compatibility gate. */
 export const APPLICATION_VERSION: string = packageJson.version;
@@ -26,4 +26,5 @@ export const REQUIRED_SHEET_NAMES = [
   'Activity History',
   'Resume Versions',
   'Profile',
+  'Application Links',
 ] as const;

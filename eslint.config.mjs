@@ -22,6 +22,15 @@ const eslintConfig = defineConfig([
     'out/**',
     'build/**',
     'next-env.d.ts',
+    // Playwright's own generated artifacts (HTML report + trace viewer
+    // assets, per-test trace/screenshot output) — minified bundles that
+    // aren't project source, only ever present after running `npm run
+    // test:e2e` locally. Already gitignored; excluding them here too so a
+    // local test run (especially one with a failure, which is when
+    // Playwright actually populates playwright-report/trace/assets) can't
+    // make `npm run lint` fail on someone else's generated JS.
+    'playwright-report/**',
+    'test-results/**',
   ]),
 ]);
 

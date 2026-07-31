@@ -18,29 +18,39 @@ const createOpportunity = async (page: Page, company: string) => {
   await expect(page.getByText('Opportunity created')).toBeVisible();
 };
 
+// Selecting a row opens the detail drawer on its "Actions" tab by default
+// (see components/applications/applications-table.tsx), so workflow
+// buttons are immediately visible — no extra tab click needed.
+//
+// A row click TOGGLES selection, and a just-created opportunity is already
+// auto-selected (see tracker-shell.tsx) — so if its drawer is already open,
+// clicking the row again would close it instead. Only click when needed.
 const openApplication = async (page: Page, company: string) => {
   await page.getByRole('button', { name: 'Applications', exact: true }).click();
   await waitForTrackerLoaded(page);
-  await page.locator('table tbody tr', { hasText: company }).click();
+  const alreadyOpen = await page.getByTestId('application-detail-drawer').filter({ hasText: company }).count();
+  if (!alreadyOpen) {
+    await page.locator('table tbody tr', { hasText: company }).click();
+  }
+};
+
+// The drawer's Overview tab is where status details like offer/assessment
+// fields and "Date applied" live — switch to it explicitly when a test
+// needs to read those (workflow actions themselves are on the default
+// "Actions" tab and never require this).
+const openOverviewTab = async (page: Page) => {
+  await page.getByTestId('drawer-tab-overview').click();
 };
 
 // OA/Interview/Offer actions are only valid once an application has been
 // marked applied (see lib/workflow-policy.ts) — before that, the buttons
 // are hidden entirely, so tests that need to reach those stages must apply
-// first, same as a real user would.
+// first, same as a real user would. Resume tracking is no longer part of
+// this workflow (the user manages resumes elsewhere) — Mark Applied needs
+// nothing beyond opening it and saving.
 const markApplied = async (page: Page, company: string) => {
-  const resumeName = `Resume ${uniqueId()}`;
-  await page.getByRole('button', { name: 'Resume Versions' }).click();
-  await waitForTrackerLoaded(page);
-  await page.getByRole('button', { name: 'Create Resume' }).click();
-  await page.getByLabel('Resume name').fill(resumeName);
-  await page.getByLabel('Target type').fill('SWE Internship');
-  await page.getByRole('button', { name: 'Save resume' }).click();
-  await expect(page.getByText('Resume created')).toBeVisible();
-
   await openApplication(page, company);
   await page.getByRole('button', { name: 'Mark Applied' }).click();
-  await page.getByLabel('Resume version').selectOption({ label: resumeName });
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
 };
@@ -51,22 +61,12 @@ test('completes an OA and interview workflow for a single application', async ({
 
   const company = `Acme ${uniqueId()}`;
   await createOpportunity(page, company);
-
-  const resumeName = `Resume ${uniqueId()}`;
-  await page.getByRole('button', { name: 'Resume Versions' }).click();
-  await waitForTrackerLoaded(page);
-  await page.getByRole('button', { name: 'Create Resume' }).click();
-  await page.getByLabel('Resume name').fill(resumeName);
-  await page.getByLabel('Target type').fill('SWE Internship');
-  await page.getByRole('button', { name: 'Save resume' }).click();
-  await expect(page.getByText('Resume created')).toBeVisible();
-
   await openApplication(page, company);
 
   // Mark Applied is only offered before the application has been submitted.
+  // Resume tracking is no longer part of this workflow.
   await expect(page.getByRole('button', { name: 'Mark Applied' })).toBeVisible();
   await page.getByRole('button', { name: 'Mark Applied' }).click();
-  await page.getByLabel('Resume version').selectOption({ label: resumeName });
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
   await expect(page.getByTestId('app-status')).toHaveText('Applied');
@@ -144,6 +144,8 @@ test('records an offer on one application and a rejection on a separate applicat
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
   await expect(page.getByTestId('app-status')).toHaveText('Offer');
+  // Offer details live on the drawer's Overview tab.
+  await openOverviewTab(page);
   // The exact displayed calendar day for a date-only value must never shift
   // with the viewer's local timezone (see lib/dates.ts / formatDateOnly).
   await expect(page.getByTestId('offer-deadline')).toHaveText('Aug 15, 2026');
@@ -441,6 +443,7 @@ test('repairs an imported Applied record missing its application date', async ({
   await expect(page.getByText('Workflow updated').last()).toBeVisible();
 
   await expect(page.getByTestId('missing-date-applied-warning')).toHaveCount(0);
+  await openOverviewTab(page);
   await expect(page.getByTestId('date-applied')).toHaveText('Jul 15, 2026');
 
   await page.getByRole('button', { name: 'Activity', exact: true }).click();

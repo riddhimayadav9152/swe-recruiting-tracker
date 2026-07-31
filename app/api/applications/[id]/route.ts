@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { workflowPayloadSchema } from '@/lib/schemas/workflows';
-import { applyWorkflow, contactWorkflow, interviewCompletedWorkflow, interviewReceivedWorkflow, oaCompletedWorkflow, oaReceivedWorkflow, offerWorkflow, rejectWorkflow, setApplicationDateWorkflow } from '@/lib/workflows/applications';
+import { applyWorkflow, contactWorkflow, editApplicationWorkflow, interviewCompletedWorkflow, interviewReceivedWorkflow, oaCompletedWorkflow, oaReceivedWorkflow, offerWorkflow, rejectWorkflow, setApplicationDateWorkflow } from '@/lib/workflows/applications';
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -17,6 +17,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       activities: true,
       documents: true,
       offers: true,
+      links: true,
     },
   });
 
@@ -72,15 +73,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
             create: {
               applicationId: id,
               fullText: payload.fullText ?? '',
+              sourceUrl: payload.sourceUrl ?? '',
+              keywords: payload.keywords ?? '',
               minimumQualifications: payload.minimumQualifications ?? '',
               preferredQualifications: payload.preferredQualifications ?? '',
-              keywords: payload.keywords ?? '',
             },
             update: {
               fullText: payload.fullText ?? '',
+              sourceUrl: payload.sourceUrl ?? '',
+              keywords: payload.keywords ?? '',
               minimumQualifications: payload.minimumQualifications ?? '',
               preferredQualifications: payload.preferredQualifications ?? '',
-              keywords: payload.keywords ?? '',
             },
           });
           await tx.activity.create({
@@ -105,6 +108,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         break;
       case 'setApplicationDate':
         updated = await setApplicationDateWorkflow(prisma, id, parsed.data);
+        break;
+      case 'editApplication':
+        updated = await editApplicationWorkflow(prisma, id, parsed.data);
         break;
       default:
         throw new Error('Unsupported action');

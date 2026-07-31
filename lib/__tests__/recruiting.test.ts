@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  computePersonalApplyByDate,
   deriveInitialStage,
   detectDuplicate,
   generateApplicationCode,
   generateNextAction,
   getDeadlineUrgency,
   getNextActionDueDate,
+  nextBusinessDay,
   validateApplicationInput,
 } from '../recruiting';
+import { parseDateOnly } from '../dates';
 
 describe('recruiting helpers', () => {
   it('generates a stable application code', () => {
@@ -79,5 +82,86 @@ describe('recruiting helpers', () => {
     expect(deriveInitialStage('Recruiter Screen')).toBe('Recruiter Screen');
     expect(deriveInitialStage('Offer')).toBe('Offer Received');
     expect(deriveInitialStage('Rejected')).toBe('Rejected');
+  });
+});
+
+describe('computePersonalApplyByDate', () => {
+  const dateFound = parseDateOnly('2026-07-01')!;
+
+  it.each([
+    ['P0', 2], ['P1', 4], ['P2', 7], ['P3', 14],
+  ] as const)('adds the priority-scaled number of days after dateFound for %s (+%d days)', (priority, days) => {
+    const result = computePersonalApplyByDate({ priority, dateFound });
+    expect(result.toISOString().slice(0, 10)).toBe(parseDateOnly(`2026-07-${String(1 + days).padStart(2, '0')}`)!.toISOString().slice(0, 10));
+  });
+
+  it('defaults the reference date to today (UTC) when dateFound is not supplied', () => {
+    const result = computePersonalApplyByDate({ priority: 'P0' });
+    const today = new Date();
+    const expected = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 2));
+    expect(result.toISOString().slice(0, 10)).toBe(expected.toISOString().slice(0, 10));
+  });
+
+  it('uses the known opening date as the base candidate when Opening Soon', () => {
+    const openingDate = parseDateOnly('2026-08-01')!;
+    const result = computePersonalApplyByDate({ priority: 'P3', dateFound, postingStatus: 'Opening Soon', postingDate: openingDate });
+    expect(result.toISOString().slice(0, 10)).toBe('2026-08-01');
+  });
+
+  it('ignores the opening date when postingStatus is not "Opening Soon"', () => {
+    const openingDate = parseDateOnly('2026-08-01')!;
+    const result = computePersonalApplyByDate({ priority: 'P0', dateFound, postingStatus: 'Open', postingDate: openingDate });
+    // P0 -> dateFound + 2 days = 2026-07-03, NOT the opening date.
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-03');
+  });
+
+  it('caps the personal deadline at two days before an official deadline when that is earlier than the priority date', () => {
+    // P3 would normally be dateFound + 14 days (2026-07-15), but the
+    // official deadline is only 3 days out (2026-07-04) — two days before
+    // that (2026-07-02) is earlier, so it wins.
+    const applicationDeadline = parseDateOnly('2026-07-04')!;
+    const result = computePersonalApplyByDate({ priority: 'P3', dateFound, applicationDeadline });
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-02');
+  });
+
+  it('never generates a personal deadline after the official deadline, even when two-days-before would be later than the priority date', () => {
+    // P0 -> dateFound + 2 days = 2026-07-03. The official deadline is
+    // 2026-07-10, so two-days-before (2026-07-08) is LATER than the P0
+    // candidate — the earlier of the two (2026-07-03) should still win,
+    // and it must never exceed the official deadline itself either way.
+    const applicationDeadline = parseDateOnly('2026-07-10')!;
+    const result = computePersonalApplyByDate({ priority: 'P0', dateFound, applicationDeadline });
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-03');
+    expect(result.getTime()).toBeLessThanOrEqual(applicationDeadline.getTime());
+  });
+
+  it('clamps to the official deadline itself when even the earlier candidate would land after it', () => {
+    // P3 -> dateFound + 14 days = 2026-07-15. Official deadline is
+    // 2026-07-05 (before that), so two-days-before (2026-07-03) applies —
+    // but if the official deadline were EARLIER than dateFound itself, the
+    // result must still never exceed it.
+    const applicationDeadline = parseDateOnly('2026-07-02')!;
+    const result = computePersonalApplyByDate({ priority: 'P3', dateFound: parseDateOnly('2026-07-01')!, applicationDeadline });
+    expect(result.getTime()).toBeLessThanOrEqual(applicationDeadline.getTime());
+  });
+});
+
+describe('nextBusinessDay', () => {
+  it('returns the very next day when it is a weekday', () => {
+    // Wednesday 2026-07-01 -> Thursday 2026-07-02
+    const result = nextBusinessDay(parseDateOnly('2026-07-01')!);
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-02');
+  });
+
+  it('skips Saturday, landing on Monday', () => {
+    // Friday 2026-07-03 -> Monday 2026-07-06
+    const result = nextBusinessDay(parseDateOnly('2026-07-03')!);
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-06');
+  });
+
+  it('skips Sunday, landing on Monday', () => {
+    // Saturday 2026-07-04 -> Monday 2026-07-06
+    const result = nextBusinessDay(parseDateOnly('2026-07-04')!);
+    expect(result.toISOString().slice(0, 10)).toBe('2026-07-06');
   });
 });

@@ -40,6 +40,7 @@ export async function loadExportData(prisma: PrismaClient) {
         notesRelation: true,
         activities: true,
         resumeVersion: true,
+        links: true,
       },
       orderBy: { createdAt: 'asc' },
     }),
@@ -93,11 +94,16 @@ export function buildExportWorkbook(data: ExportData): XLSX.WorkBook {
       'Application Code': app.applicationCode,
       Company: app.company,
       Role: app.role,
+      'Job ID': app.jobId ?? '',
       Status: app.status,
       'Current Stage': app.currentStage ?? '',
       Priority: app.priority,
+      'Posting Status': app.postingStatus ?? '',
       'Application URL': app.applicationUrl ?? '',
+      'Candidate Portal URL': app.candidatePortalUrl ?? '',
       Location: app.location ?? '',
+      'Work Model': app.workModel ?? '',
+      'Posting Date': dateOnlyCell(app.postingDate),
       'Next Action': app.nextAction ?? '',
       'Next Action Due': nextActionDueCell(app.nextActionDue, app.nextActionDueKind),
       'Next Action Due Kind': app.nextActionDueKind,
@@ -112,6 +118,20 @@ export function buildExportWorkbook(data: ExportData): XLSX.WorkBook {
       'Interview Timezone': currentInterview?.timezone ?? '',
       'Decision Deadline': app.offers ? dateOnlyCell(app.offers.decisionDeadline) : '',
       Compensation: app.offers?.compensationSummary ?? '',
+      'Login Email': app.emailUsed ?? '',
+      'Portal Username': app.portalUsername ?? '',
+      'Password Manager Reference': app.passwordManagerReference ?? '',
+      'Confirmation Number': app.confirmationNumber ?? '',
+      // Distinct from the "Compensation" column above (which flattens the
+      // formal Offer record's compensationSummary onto this row for
+      // readability) — this is the Application's own personal notes-style
+      // Compensation Summary field (see item 3's editable-field list), never
+      // written by the offer workflow.
+      'Compensation Summary': app.compensationSummary ?? '',
+      Eligibility: app.eligibility ?? '',
+      Sponsorship: app.sponsorship ?? '',
+      'Why Fit': app.whyFit ?? '',
+      'Last Verified At': utcTimestampCell(app.lastVerifiedAt),
       Outcome: app.outcome ?? '',
       Notes: app.notes ?? '',
       Archived: app.archived ? 'Yes' : 'No',
@@ -134,6 +154,18 @@ export function buildExportWorkbook(data: ExportData): XLSX.WorkBook {
       'Saved At': utcTimestampCell(app.jobDescription?.savedAt ?? null),
     }));
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(jobDescriptionRows), 'Job Descriptions');
+
+  const applicationLinkRows = data.applications.flatMap((app) => app.links.map((link) => ({
+    'Application Code': app.applicationCode,
+    Company: app.company,
+    Label: link.label,
+    URL: link.url,
+    Category: link.category ?? '',
+    Notes: link.notes ?? '',
+    'Created At': utcTimestampCell(link.createdAt),
+    'Updated At': utcTimestampCell(link.updatedAt),
+  })));
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(applicationLinkRows), 'Application Links');
 
   const assessmentRows = data.applications.flatMap((app) => app.assessments.map((assessment) => ({
     'Application Code': app.applicationCode,

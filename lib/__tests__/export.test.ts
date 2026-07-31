@@ -24,6 +24,10 @@ const baseApplication = {
   eligibility: null,
   sponsorship: null,
   whyFit: null,
+  postingStatus: null,
+  portalUsername: null,
+  passwordManagerReference: null,
+  lastVerifiedAt: null,
   nextAction: 'Review and apply',
   nextActionDue: null,
   nextActionDueKind: 'timestamp',
@@ -43,6 +47,7 @@ const baseApplication = {
   contacts: [] as never[],
   notesRelation: [] as never[],
   activities: [] as never[],
+  links: [] as never[],
   offers: null,
 };
 
@@ -53,7 +58,7 @@ describe('buildExportWorkbook', () => {
     const data: ExportData = { applications: [], resumeVersions: [], profile: null };
     const workbook = buildExportWorkbook(data);
     expect(workbook.SheetNames).toEqual([
-      'Metadata', 'Applications', 'Job Descriptions', 'Assessments', 'Interviews', 'Offers',
+      'Metadata', 'Applications', 'Job Descriptions', 'Application Links', 'Assessments', 'Interviews', 'Offers',
       'Contacts', 'Notes', 'Activity History', 'Resume Versions', 'Profile',
     ]);
   });
@@ -63,7 +68,7 @@ describe('buildExportWorkbook', () => {
     const workbook = buildExportWorkbook(data);
     const rows = readSheet(workbook, 'Metadata');
     expect(rows).toHaveLength(1);
-    expect(rows[0]['Export Format Version']).toBe(1);
+    expect(rows[0]['Export Format Version']).toBe(2);
     expect(typeof rows[0]['Application Version']).toBe('string');
     expect(typeof rows[0]['Export Timestamp']).toBe('string');
     expect(rows[0]['Required Sheets']).toContain('Applications');

@@ -16,13 +16,13 @@ function pushSchema(databaseUrl: string) {
   });
 }
 
-function buildRestoreWorkbookBuffer(): Buffer {
+function buildRestoreWorkbookBuffer(applicationsOverride?: Array<Record<string, unknown>>): Buffer {
   const workbook = XLSX.utils.book_new();
   const sheets: Record<string, Array<Record<string, unknown>>> = {
     [METADATA_SHEET_NAME]: [{ 'Export Format Version': EXPORT_FORMAT_VERSION, 'Application Version': '0.1.0', 'Export Timestamp': new Date().toISOString(), 'Required Sheets': REQUIRED_SHEET_NAMES.join(', ') }],
-    Applications: [{ 'Application Code': 'ROUTE-1', Company: 'Route Co', Role: 'Software Engineer', Status: 'Not Applied' }],
-    'Job Descriptions': [], Assessments: [], Interviews: [], Offers: [], Contacts: [], Notes: [], 'Activity History': [], 'Resume Versions': [], Profile: [],
   };
+  for (const name of REQUIRED_SHEET_NAMES) sheets[name] = [];
+  sheets.Applications = applicationsOverride ?? [{ 'Application Code': 'ROUTE-1', Company: 'Route Co', Role: 'Software Engineer', Status: 'Not Applied' }];
   for (const [name, rows] of Object.entries(sheets)) {
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), name);
   }
@@ -120,16 +120,7 @@ describe('POST /api/import/restore', () => {
 
     // A workbook whose Applications row has no Application Code — a
     // well-formed request (valid file, valid mode) that fails validation.
-    const workbook = XLSX.utils.book_new();
-    const sheets: Record<string, Array<Record<string, unknown>>> = {
-      [METADATA_SHEET_NAME]: [{ 'Export Format Version': EXPORT_FORMAT_VERSION, 'Application Version': '0.1.0', 'Export Timestamp': new Date().toISOString(), 'Required Sheets': REQUIRED_SHEET_NAMES.join(', ') }],
-      Applications: [{ Company: 'Route Co', Role: 'Software Engineer', Status: 'Not Applied' }],
-      'Job Descriptions': [], Assessments: [], Interviews: [], Offers: [], Contacts: [], Notes: [], 'Activity History': [], 'Resume Versions': [], Profile: [],
-    };
-    for (const [name, rows] of Object.entries(sheets)) {
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), name);
-    }
-    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    const buffer = buildRestoreWorkbookBuffer([{ Company: 'Route Co', Role: 'Software Engineer', Status: 'Not Applied' }]);
 
     const formData = new FormData();
     formData.set('file', new Blob([new Uint8Array(buffer)]), 'restore.xlsx');

@@ -66,8 +66,15 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
         priority: 'P0', applicationUrl: 'https://multiround.example.com/apply', location: 'Remote',
         applicationDeadline: new Date('2026-09-30T00:00:00.000Z'), dateFound: new Date('2026-06-01T00:00:00.000Z'), dateApplied: new Date('2026-06-05T00:00:00.000Z'),
         resumeVersionId: activeResume.id, nextAction: 'Prep for final panel', nextActionDue: new Date('2026-08-25T18:00:00.000Z'), nextActionDueKind: 'timestamp',
+        jobId: 'REQ-4471', postingStatus: 'Open', candidatePortalUrl: 'https://portal.multiround.example.com', workModel: 'Hybrid',
+        postingDate: new Date('2026-05-25T00:00:00.000Z'), emailUsed: 'candidate@example.com', portalUsername: 'candidate123',
+        passwordManagerReference: '1Password: Multi Round Co', confirmationNumber: 'CONF-9981', compensationSummary: '$190k base',
+        eligibility: 'US citizen', sponsorship: 'Not required', whyFit: 'Strong systems background',
+        lastVerifiedAt: new Date('2026-07-15T12:00:00.000Z'),
       },
     });
+    await source.prisma.applicationLink.create({ data: { applicationId: multiRound.id, label: 'Careers page', url: 'https://multiround.example.com/careers', category: 'Company', notes: 'General company info' } });
+    await source.prisma.applicationLink.create({ data: { applicationId: multiRound.id, label: 'Interview prep doc', url: 'https://notes.example.com/prep', category: 'Interview Preparation' } });
     await source.prisma.assessment.create({ data: { applicationId: multiRound.id, type: 'OA', platform: 'HackerRank', dueAt: new Date('2026-06-10T13:00:00.000Z'), timezone: 'America/New_York' } });
     await source.prisma.assessment.create({ data: { applicationId: multiRound.id, type: 'OA', platform: 'Coderbyte', dueAt: new Date('2026-06-20T15:00:00.000Z'), timezone: 'America/Chicago' } });
     await source.prisma.interview.create({ data: { applicationId: multiRound.id, stage: 'Recruiter Screen', scheduledStart: new Date('2026-06-25T17:00:00.000Z'), timezone: 'America/New_York', interviewer: 'Recruiter A' } });
@@ -122,6 +129,7 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     // --- endpoint would upon receiving an uploaded file. ---
     const parsed = parseMultiSheetWorkbook(buffer);
     expect(parsed.sheets.applications).toHaveLength(4);
+    expect(parsed.sheets.applicationLinks).toHaveLength(2);
     expect(parsed.sheets.assessments).toHaveLength(2);
     expect(parsed.sheets.interviews).toHaveLength(3);
     expect(parsed.sheets.offers).toHaveLength(1);
@@ -139,6 +147,7 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     expect(summary.errors).toEqual([]);
     expect(summary.unmatchedApplicationCodes).toEqual([]);
     expect(summary.applications).toEqual({ created: 4, updated: 0 });
+    expect(summary.applicationLinks).toEqual({ created: 2 });
     expect(summary.assessments).toEqual({ created: 2 });
     expect(summary.interviews).toEqual({ created: 3 });
     expect(summary.offers).toEqual({ created: 1 });
@@ -152,7 +161,7 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     // --- Verify EVERY model round-tripped with equivalent row counts and field values. ---
     const [reimportedApps, reimportedResumes, reimportedProfile] = await Promise.all([
       target.prisma.application.findMany({
-        include: { assessments: true, interviews: true, offers: true, contacts: true, notesRelation: true, activities: true, jobDescription: true, resumeVersion: true },
+        include: { assessments: true, interviews: true, offers: true, contacts: true, notesRelation: true, activities: true, jobDescription: true, resumeVersion: true, links: true },
       }),
       target.prisma.resumeVersion.findMany(),
       target.prisma.userProfile.findFirst(),
@@ -189,6 +198,31 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     expect(rtMulti.nextActionDueKind).toBe('timestamp');
     expect(rtMulti.nextActionDue?.toISOString()).toBe('2026-08-25T18:00:00.000Z');
     expect(rtMulti.resumeVersion?.name).toBe('SWE Resume 2026');
+
+    // Item 3/4/10 fields: portal metadata, posting status, additional links.
+    expect(rtMulti.jobId).toBe('REQ-4471');
+    expect(rtMulti.postingStatus).toBe('Open');
+    expect(rtMulti.candidatePortalUrl).toBe('https://portal.multiround.example.com');
+    expect(rtMulti.workModel).toBe('Hybrid');
+    expect(rtMulti.postingDate?.toISOString().slice(0, 10)).toBe('2026-05-25');
+    expect(rtMulti.emailUsed).toBe('candidate@example.com');
+    expect(rtMulti.portalUsername).toBe('candidate123');
+    expect(rtMulti.passwordManagerReference).toBe('1Password: Multi Round Co');
+    expect(rtMulti.confirmationNumber).toBe('CONF-9981');
+    expect(rtMulti.compensationSummary).toBe('$190k base');
+    expect(rtMulti.eligibility).toBe('US citizen');
+    expect(rtMulti.sponsorship).toBe('Not required');
+    expect(rtMulti.whyFit).toBe('Strong systems background');
+    expect(rtMulti.lastVerifiedAt?.toISOString()).toBe('2026-07-15T12:00:00.000Z');
+
+    expect(rtMulti.links).toHaveLength(2);
+    const careersLink = rtMulti.links.find((l) => l.label === 'Careers page')!;
+    expect(careersLink.url).toBe('https://multiround.example.com/careers');
+    expect(careersLink.category).toBe('Company');
+    expect(careersLink.notes).toBe('General company info');
+    const prepLink = rtMulti.links.find((l) => l.label === 'Interview prep doc')!;
+    expect(prepLink.url).toBe('https://notes.example.com/prep');
+    expect(prepLink.category).toBe('Interview Preparation');
 
     // BOTH OA rounds present — never collapsed to just the "current" one.
     expect(rtMulti.assessments).toHaveLength(2);
@@ -268,6 +302,7 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
       activities: await target.prisma.activity.count(),
       offers: await target.prisma.offer.count(),
       resumeVersions: await target.prisma.resumeVersion.count(),
+      applicationLinks: await target.prisma.applicationLink.count(),
     };
 
     const exportData = await loadExportData(source.prisma);
@@ -278,6 +313,7 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     const summary = await commitMultiSheetImport(target.prisma, parsed, 'replace');
     expect(summary.ok).toBe(true);
     expect(summary.applications).toEqual({ created: 0, updated: 4 });
+    expect(summary.applicationLinks).toEqual({ created: 2 });
     expect(summary.errors).toEqual([]);
     expect(summary.unmatchedApplicationCodes).toEqual([]);
 
@@ -293,6 +329,7 @@ describe('export -> multi-sheet import round-trip (true database round-trip supp
     expect(await target.prisma.activity.count()).toBe(beforeCounts.activities);
     expect(await target.prisma.offer.count()).toBe(beforeCounts.offers);
     expect(await target.prisma.resumeVersion.count()).toBe(beforeCounts.resumeVersions);
+    expect(await target.prisma.applicationLink.count()).toBe(beforeCounts.applicationLinks);
 
     const rtMulti = await target.prisma.application.findFirstOrThrow({ where: { applicationCode: 'RT-MULTI' }, include: { assessments: true, interviews: true } });
     expect(rtMulti.assessments).toHaveLength(2);

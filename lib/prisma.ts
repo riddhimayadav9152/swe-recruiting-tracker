@@ -27,8 +27,19 @@ const databaseUrl = resolveDatabaseUrl();
 // the exact same way (relative to prisma/schema.prisma's directory, not cwd).
 export const resolvedDatabaseFilePath = databaseUrl.startsWith('file:') ? databaseUrl.slice('file:'.length) : null;
 
+// SQLite has no real concept of concurrent writers — Prisma's default
+// connection pool (multiple connections against the same file) lets several
+// requests race to check-then-insert against the same unique constraint
+// (e.g. applicationCode), which can surface as a spurious P2002 under
+// concurrent load (visible under Playwright's parallel workers hitting the
+// same dev server). Forcing a single connection serializes all queries
+// through one connection, matching SQLite's actual concurrency model,
+// without changing `databaseUrl`/`resolvedDatabaseFilePath` (which lib/db-backup.ts
+// needs as a plain file path, with no query string).
+const prismaConnectionUrl = databaseUrl.startsWith('file:') ? `${databaseUrl}?connection_limit=1` : databaseUrl;
+
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
-export const prisma = globalForPrisma.prisma ?? new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+export const prisma = globalForPrisma.prisma ?? new PrismaClient({ datasources: { db: { url: prismaConnectionUrl } } });
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;

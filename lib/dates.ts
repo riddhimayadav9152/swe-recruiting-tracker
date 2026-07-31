@@ -90,6 +90,22 @@ export const parseDateOnly = (value: unknown): Date | null => {
 };
 
 /**
+ * Adds (or subtracts, for a negative `days`) whole calendar days to a
+ * date-only value by reading/writing its UTC calendar fields — never
+ * `date-fns`'s `addDays`/`subDays`, which operate in the SERVER's local
+ * timezone and would silently shift a UTC-midnight-anchored value (see
+ * `parseDateOnly`) onto the wrong calendar day for any server not running in
+ * UTC. Use this for all date-only arithmetic (personal deadline generation,
+ * etc); use real timezone-aware logic (`parseZonedDateTime`) for anything
+ * that depends on wall-clock time in a specific zone.
+ */
+export const addUtcDays = (date: Date, days: number): Date =>
+  new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + days));
+
+/** Today's calendar date, anchored at UTC midnight — the same shape `parseDateOnly` produces, safe to use as a `dateFound`-shaped fallback reference date. */
+export const utcToday = (): Date => addUtcDays(new Date(), 0);
+
+/**
  * Parses an HTML `<input type="datetime-local">` value, or any other
  * timestamp string that already carries a time component, as *local server
  * time*. This is only correct when the value doesn't actually depend on a

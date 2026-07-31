@@ -1,5 +1,5 @@
 import { format, subDays } from 'date-fns';
-import { isDeadlineOverdue, resolveDeadlineInstant, type DeadlineKind } from '@/lib/dates';
+import { addUtcDays, isDeadlineOverdue, resolveDeadlineInstant, utcToday, type DeadlineKind } from '@/lib/dates';
 
 export const statuses = [
   'Not Applied',
@@ -18,8 +18,13 @@ export const statuses = [
 
 export const priorities = ['P0', 'P1', 'P2', 'P3'] as const;
 
+export const postingStatuses = ['Open', 'Opening Soon', 'Closed', 'Unknown'] as const;
+
 export type ApplicationStatus = (typeof statuses)[number];
 export type Priority = (typeof priorities)[number];
+export type PostingStatus = (typeof postingStatuses)[number];
+
+export const TERMINAL_STATUSES: readonly ApplicationStatus[] = ['Accepted', 'Rejected', 'Withdrawn', 'Closed'];
 
 export type ApplicationInput = {
   company: string;
@@ -170,3 +175,65 @@ export const formatDisplayDate = (value: Date | string | null | undefined) => {
   const date = typeof value === 'string' ? new Date(value) : value;
   return format(date, 'MMM d, yyyy');
 };
+
+// --- Personal deadline generation --------------------------------------------
+//
+// `nextActionDue` is the user's OWN personal action deadline — distinct from
+// `applicationDeadline`, the employer's official deadline (displayed
+// separately, for context only). These rules generate a personal apply-by
+// date for a newly created or imported Not Applied/Preparing application
+// when one isn't explicitly supplied.
+
+const PRIORITY_APPLY_BY_DAYS: Record<Priority, number> = { P0: 2, P1: 4, P2: 7, P3: 14 };
+
+export type PersonalApplyByInput = {
+  priority: Priority;
+  /** Defaults to today (UTC) when not supplied. */
+  dateFound?: Date | null;
+  applicationDeadline?: Date | null;
+  postingStatus?: string | null;
+  /** Only consulted when postingStatus is "Opening Soon" — treated as the known opening date. */
+  postingDate?: Date | null;
+};
+
+/**
+ * Generates the personal "apply by" deadline used when a new/imported
+ * Not Applied or Preparing application doesn't already have its own
+ * `nextActionDue`:
+ *  - a priority-scaled number of days after `dateFound` (P0 fastest, P3
+ *    slowest) as the base candidate;
+ *  - UNLESS the posting is "Opening Soon" with a known opening date, in
+ *    which case the opening date itself is the base candidate instead;
+ *  - then, if an official `applicationDeadline` is known, capped to the
+ *    EARLIER of that base candidate or two days before the official
+ *    deadline;
+ *  - and finally clamped so the result is NEVER later than the official
+ *    deadline itself.
+ * Always returns a date-only value (UTC-midnight-anchored, matching
+ * `parseDateOnly`'s own convention) — never a real timestamp.
+ */
+export function computePersonalApplyByDate(input: PersonalApplyByInput): Date {
+  const referenceDate = input.dateFound ?? utcToday();
+  let candidate = addUtcDays(referenceDate, PRIORITY_APPLY_BY_DAYS[input.priority]);
+
+  if (input.postingStatus === 'Opening Soon' && input.postingDate) {
+    candidate = input.postingDate;
+  }
+
+  if (input.applicationDeadline) {
+    const twoDaysBeforeOfficial = addUtcDays(input.applicationDeadline, -2);
+    if (twoDaysBeforeOfficial.getTime() < candidate.getTime()) candidate = twoDaysBeforeOfficial;
+    if (candidate.getTime() > input.applicationDeadline.getTime()) candidate = input.applicationDeadline;
+  }
+
+  return candidate;
+}
+
+/** The next Monday–Friday calendar day after `date` (skips Saturday/Sunday) — used for "follow up next business day" workflow defaults. */
+export function nextBusinessDay(date: Date): Date {
+  let next = addUtcDays(date, 1);
+  const day = next.getUTCDay();
+  if (day === 6) next = addUtcDays(next, 2);
+  else if (day === 0) next = addUtcDays(next, 1);
+  return next;
+}

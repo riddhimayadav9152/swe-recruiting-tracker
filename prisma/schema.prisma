@@ -11,104 +11,140 @@ datasource db {
 }
 
 model Application {
-  id                String          @id @default(cuid())
-  applicationCode   String          @unique
-  company           String
-  role              String
-  jobId             String?
-  location          String?
-  workModel         String?
-  postingDate       DateTime?
-  applicationDeadline DateTime?
-  dateFound         DateTime?
-  dateApplied       DateTime?
-  status            String          @default("Not Applied")
-  currentStage      String?
-  priority          String          @default("P2")
-  applicationUrl    String?
-  candidatePortalUrl String?
-  confirmationNumber String?
-  compensationSummary String?
-  eligibility       String?
-  sponsorship       String?
-  whyFit            String?
-  nextAction        String?
-  nextActionDue     DateTime?
+  id                       String            @id @default(cuid())
+  applicationCode          String            @unique
+  company                  String
+  role                     String
+  jobId                    String?
+  location                 String?
+  workModel                String?
+  postingDate              DateTime?
+  applicationDeadline      DateTime?
+  dateFound                DateTime?
+  dateApplied              DateTime?
+  status                   String            @default("Not Applied")
+  currentStage             String?
+  priority                 String            @default("P2")
+  applicationUrl           String?
+  candidatePortalUrl       String?
+  confirmationNumber       String?
+  compensationSummary      String?
+  eligibility              String?
+  sponsorship              String?
+  whyFit                   String?
+  nextAction               String?
+  nextActionDue            DateTime?
   // Whether nextActionDue is a calendar date (e.g. copied from an offer's
   // decisionDeadline) or a real timestamp (e.g. "one day before the
   // interview") — tracked explicitly so the UI knows which formatter to use
   // instead of guessing from the value itself (a timestamp can legitimately
   // land on exact UTC midnight). See lib/dates.ts's `formatByKind`.
-  nextActionDueKind String          @default("timestamp")
-  emailUsed         String?
-  coverLetterStatus String?
-  referralStatus    String?
-  notes             String?
-  outcome           String?
-  archived          Boolean         @default(false)
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
-  resumeVersionId   String?
-  resumeVersion     ResumeVersion?  @relation(fields: [resumeVersionId], references: [id])
-  jobDescription    JobDescription?
-  interviews        Interview[]
-  assessments       Assessment[]
-  contacts          Contact[]
-  notesRelation     Note[]
-  activities        Activity[]
-  documents         Document[]
-  offers            Offer?
+  nextActionDueKind        String            @default("timestamp")
+  emailUsed                String?
+  // The following two fields are kept only for backward compatibility with
+  // existing rows/exports — the user manages resumes and cover letters
+  // elsewhere now, so neither is read or written by any current workflow or
+  // UI surface (see resumeVersionId/resumeVersion below for the same reason).
+  coverLetterStatus        String?
+  referralStatus           String?
+  notes                    String?
+  outcome                  String?
+  // Posting-status ("Open"/"Opening Soon"/"Closed"/"Unknown") is distinct
+  // from `status` (the candidate's own pipeline status, e.g. "Applied") —
+  // this tracks whether the JOB POSTING itself is still live.
+  postingStatus            String?
+  portalUsername           String?
+  // Never an actual password — this app is an unencrypted local SQLite
+  // database, so this only ever stores a REFERENCE to where the real
+  // credential lives (e.g. "1Password > Work > Acme").
+  passwordManagerReference String?
+  lastVerifiedAt           DateTime?
+  archived                 Boolean           @default(false)
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+  // Kept for backward compatibility with existing rows/exports only — the
+  // user manages resumes elsewhere now, so this is never read or written by
+  // any current workflow or UI surface.
+  resumeVersionId          String?
+  resumeVersion            ResumeVersion?    @relation(fields: [resumeVersionId], references: [id])
+  jobDescription           JobDescription?
+  interviews               Interview[]
+  assessments              Assessment[]
+  contacts                 Contact[]
+  notesRelation            Note[]
+  activities               Activity[]
+  documents                Document[]
+  offers                   Offer?
+  links                    ApplicationLink[]
+}
+
+model ApplicationLink {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id])
+  label         String
+  url           String
+  category      String?
+  notes         String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 }
 
 model JobDescription {
-  id                    String    @id @default(cuid())
-  applicationId         String    @unique
-  application           Application @relation(fields: [applicationId], references: [id])
-  fullText              String?
-  minimumQualifications String?
+  id                      String      @id @default(cuid())
+  applicationId           String      @unique
+  application             Application @relation(fields: [applicationId], references: [id])
+  fullText                String?
+  // Kept for backward compatibility with existing rows/exports only —
+  // removed from the visible Job Descriptions editor (it now shows only
+  // Full Text, Source URL, and Keywords).
+  minimumQualifications   String?
   preferredQualifications String?
-  keywords              String?
-  savedAt               DateTime  @default(now())
-  sourceUrl             String?
-  contentHash           String?
+  keywords                String?
+  savedAt                 DateTime    @default(now())
+  sourceUrl               String?
+  contentHash             String?
 }
 
+/// Kept for backward compatibility with existing rows/exports only — the
+/// user manages resumes elsewhere now, so this is no longer surfaced in any
+/// workflow or UI (see Application.resumeVersionId/resumeVersion).
 model ResumeVersion {
-  id            String        @id @default(cuid())
-  name          String
-  fileName      String?
-  description   String?
-  targetType    String
-  filePath      String?
-  createdAt     DateTime      @default(now())
-  archived      Boolean       @default(false)
-  applications  Application[]
+  id           String        @id @default(cuid())
+  name         String
+  fileName     String?
+  description  String?
+  targetType   String
+  filePath     String?
+  createdAt    DateTime      @default(now())
+  archived     Boolean       @default(false)
+  applications Application[]
 }
 
 model Assessment {
-  id              String      @id @default(cuid())
-  applicationId   String
-  application     Application @relation(fields: [applicationId], references: [id])
-  type            String
-  platform        String?
-  receivedAt      DateTime?
-  dueAt           DateTime?
+  id                   String      @id @default(cuid())
+  applicationId        String
+  application          Application @relation(fields: [applicationId], references: [id])
+  type                 String
+  platform             String?
+  receivedAt           DateTime?
+  dueAt                DateTime?
   // IANA timezone the assessment's due date was entered in (e.g.
   // "America/New_York"), so dueAt — a wall-clock deadline, not an
   // instantaneous event — can be interpreted and displayed correctly
   // regardless of the viewer's own timezone. Nullable for assessments
   // created before this field existed; new ones always set it (defaulting
   // to the browser's timezone in the UI).
-  timezone        String?
-  completedAt     DateTime?
-  durationMinutes Int?
-  questionCount   Int?
-  topics          String?
-  difficulty      String?
-  confidence      String?
-  result          String?
+  timezone             String?
+  completedAt          DateTime?
+  durationMinutes      Int?
+  questionCount        Int?
+  topics               String?
+  difficulty           String?
+  confidence           String?
+  result               String?
   encounteredQuestions String?
-  notes           String?
+  notes                String?
 }
 
 model Offer {
@@ -124,92 +160,92 @@ model Offer {
 }
 
 model Interview {
-  id                String       @id @default(cuid())
-  applicationId     String
-  application       Application  @relation(fields: [applicationId], references: [id])
-  stage             String
-  scheduledStart    DateTime?
-  scheduledEnd      DateTime?
-  timezone          String?
-  format            String?
-  location          String?
-  meetingUrl        String?
-  interviewer       String?
-  recruiter         String?
-  completedAt       DateTime?
-  result            String?
-  questions         String?
-  whatWentWell      String?
-  improvements      String?
-  followUpDate      DateTime?
-  notes             String?
+  id             String      @id @default(cuid())
+  applicationId  String
+  application    Application @relation(fields: [applicationId], references: [id])
+  stage          String
+  scheduledStart DateTime?
+  scheduledEnd   DateTime?
+  timezone       String?
+  format         String?
+  location       String?
+  meetingUrl     String?
+  interviewer    String?
+  recruiter      String?
+  completedAt    DateTime?
+  result         String?
+  questions      String?
+  whatWentWell   String?
+  improvements   String?
+  followUpDate   DateTime?
+  notes          String?
 }
 
 model Contact {
-  id                String       @id @default(cuid())
-  applicationId     String
-  application       Application  @relation(fields: [applicationId], references: [id])
-  name              String
-  title             String?
-  company           String?
-  email             String?
-  linkedInUrl       String?
-  relationship      String?
-  referralStatus    String?
-  lastContacted     DateTime?
-  nextFollowUp      DateTime?
-  notes             String?
+  id             String      @id @default(cuid())
+  applicationId  String
+  application    Application @relation(fields: [applicationId], references: [id])
+  name           String
+  title          String?
+  company        String?
+  email          String?
+  linkedInUrl    String?
+  relationship   String?
+  referralStatus String?
+  lastContacted  DateTime?
+  nextFollowUp   DateTime?
+  notes          String?
 }
 
 model Note {
-  id            String       @id @default(cuid())
+  id            String      @id @default(cuid())
   applicationId String
-  application   Application  @relation(fields: [applicationId], references: [id])
+  application   Application @relation(fields: [applicationId], references: [id])
   category      String?
   content       String
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 }
 
 model Activity {
-  id                String       @id @default(cuid())
-  applicationId     String
-  application       Application  @relation(fields: [applicationId], references: [id])
-  eventType         String
-  previousStatus    String?
-  newStatus         String?
-  previousStage     String?
-  newStage          String?
-  summary           String
-  metadataJson      String?
-  createdAt         DateTime     @default(now())
+  id             String      @id @default(cuid())
+  applicationId  String
+  application    Application @relation(fields: [applicationId], references: [id])
+  eventType      String
+  previousStatus String?
+  newStatus      String?
+  previousStage  String?
+  newStage       String?
+  summary        String
+  metadataJson   String?
+  createdAt      DateTime    @default(now())
 }
 
 model Document {
-  id            String       @id @default(cuid())
+  id            String      @id @default(cuid())
   applicationId String
-  application   Application  @relation(fields: [applicationId], references: [id])
+  application   Application @relation(fields: [applicationId], references: [id])
   type          String
   name          String
   filePath      String?
-  createdAt     DateTime     @default(now())
+  createdAt     DateTime    @default(now())
 }
 
 model UserProfile {
-  id                     String   @id @default(cuid())
-  name                   String   @default("Riddhima Yadav")
-  school                 String   @default("The University of Texas at Austin")
-  major                  String   @default("Computer Science")
-  graduation             String   @default("December 2027")
-  workAuthorization      String   @default("U.S. citizen")
-  preferredLocation      String   @default("New York City")
-  otherLocations         String   @default("Major U.S. cities")
-  currentExperience      String   @default("DraftKings Software Engineering Intern")
-  targetRoles            String   @default("2027 Software Engineering Internships")
-  targetCategories       String   @default("Highly selective technology, quantitative trading, fintech and strong product companies")
-  defaultFollowUpDays    Int      @default(10)
-  defaultDueDays         Int      @default(2)
-  dateFormat             String   @default("MM/dd/yyyy")
-  theme                  String   @default("light")
-  databaseLocation       String   @default("data/dev.db")
+  id                  String @id @default(cuid())
+  name                String @default("Riddhima Yadav")
+  school              String @default("The University of Texas at Austin")
+  major               String @default("Computer Science")
+  graduation          String @default("December 2027")
+  workAuthorization   String @default("U.S. citizen")
+  preferredLocation   String @default("New York City")
+  otherLocations      String @default("Major U.S. cities")
+  currentExperience   String @default("DraftKings Software Engineering Intern")
+  targetRoles         String @default("2027 Software Engineering Internships")
+  targetCategories    String @default("Highly selective technology, quantitative trading, fintech and strong product companies")
+  defaultFollowUpDays Int    @default(10)
+  defaultDueDays      Int    @default(2)
+  dateFormat          String @default("MM/dd/yyyy")
+  theme               String @default("light")
+  databaseLocation    String @default("data/dev.db")
 }

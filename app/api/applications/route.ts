@@ -17,6 +17,7 @@ export async function GET() {
       activities: true,
       documents: true,
       offers: true,
+      links: true,
     },
   });
   return NextResponse.json(applications);

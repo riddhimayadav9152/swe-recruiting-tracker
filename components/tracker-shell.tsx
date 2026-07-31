@@ -1,43 +1,18 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { format, formatDistanceToNow } from 'date-fns';
-import { formatByKind, formatDateOnly, formatInZone, formatTimestamp, isDeadlineOverdue, resolveDeadlineInstant, type DeadlineKind } from '@/lib/dates';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { format } from 'date-fns';
+import { formatByKind, formatDateOnly, formatInZone, formatTimestamp, isDeadlineOverdue, resolveDeadlineInstant } from '@/lib/dates';
 import { getActionVisibility, isMissingApplicationDate, type TransitionAction } from '@/lib/workflow-policy';
-import { Activity, BriefcaseBusiness, CalendarDays, Download, FileText, FolderOpen, LayoutGrid, PlusCircle, Search, Settings, Users, FileStack, MessageSquareText } from 'lucide-react';
+import { isPersonalDeadlineOverdue, sortByPersonalDeadline } from '@/lib/deadline-sort';
+import { Activity, BriefcaseBusiness, CalendarDays, Download, FileText, FolderOpen, LayoutGrid, Search, Settings, Users, MessageSquareText } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { validateApplicationInput } from '@/lib/recruiting';
-
-type ApplicationRecord = {
-  id: string;
-  applicationCode: string;
-  company: string;
-  role: string;
-  status: string;
-  currentStage: string | null;
-  priority: string;
-  applicationUrl: string | null;
-  location: string | null;
-  nextAction: string | null;
-  nextActionDue: string | null;
-  nextActionDueKind: 'date' | 'timestamp';
-  applicationDeadline: string | null;
-  dateFound: string | null;
-  dateApplied: string | null;
-  notes: string | null;
-  archived: boolean;
-  createdAt: string;
-  updatedAt: string;
-  jobDescription: { fullText: string | null } | null;
-  resumeVersion: { id: string; name: string } | null;
-  interviews: Array<{ id: string; stage: string; scheduledStart: string | null; timezone: string | null; completedAt: string | null; notes: string | null }>;
-  assessments: Array<{ id: string; type: string; dueAt: string | null; timezone: string | null; platform: string | null; durationMinutes: number | null; questionCount: number | null; topics: string | null; completedAt: string | null; result: string | null }>;
-  contacts: Array<{ name: string; email: string | null; notes: string | null }>;
-  activities: Array<{ eventType: string; summary: string; createdAt: string }>;
-  offers: { offerDate: string | null; decisionDeadline: string | null; compensationSummary: string | null; notes: string | null } | null;
-};
-
-type ResumeRecord = { id:string; name:string; targetType:string; fileName:string | null; description:string | null; applications: Array<{ id:string }> };
+import { Sidebar, type SidebarSection } from './sidebar';
+import { ApplicationsTable } from './applications/applications-table';
+import { EditApplicationModal } from './applications/edit-application-modal';
+import { JsonImportModal } from './json-import-modal';
+import { TERMINAL_STATUSES, type ApplicationRecord } from './applications/types';
 
 type ProfileRecord = { id:string; name:string; school:string; major:string; graduation:string; preferredLocation:string; currentExperience:string; targetRoles:string; targetCategories:string };
 
@@ -48,7 +23,7 @@ type ProfileRecord = { id:string; name:string; school:string; major:string; grad
 // the server is always the source of truth for validation.
 const IMPORT_TARGET_FIELDS = [
   'company', 'role', 'applicationUrl', 'priority', 'status', 'location',
-  'applicationDeadline', 'dateFound', 'notes', 'dateApplied', 'resumeVersionName',
+  'applicationDeadline', 'dateFound', 'notes', 'dateApplied',
   'assessmentDueAt', 'assessmentTimezone', 'assessmentPlatform',
   'interviewScheduledStart', 'interviewTimezone',
   'offerDecisionDeadline', 'offerCompensationSummary', 'outcome',
@@ -58,7 +33,7 @@ type ImportTargetField = (typeof IMPORT_TARGET_FIELDS)[number];
 const IMPORT_FIELD_LABELS: Record<ImportTargetField, string> = {
   company: 'Company', role: 'Role', applicationUrl: 'Application URL', priority: 'Priority', status: 'Status',
   location: 'Location', applicationDeadline: 'Application Deadline', dateFound: 'Date Found', notes: 'Notes',
-  dateApplied: 'Date Applied', resumeVersionName: 'Resume Version (by name)',
+  dateApplied: 'Date Applied',
   assessmentDueAt: 'OA Due At', assessmentTimezone: 'OA Timezone', assessmentPlatform: 'OA Platform',
   interviewScheduledStart: 'Interview Scheduled Start', interviewTimezone: 'Interview Timezone',
   offerDecisionDeadline: 'Decision Deadline', offerCompensationSummary: 'Compensation',
@@ -68,7 +43,6 @@ type ImportColumnMap = Record<ImportTargetField, string | null>;
 type ImportRowDecision = 'create' | 'update' | 'skip' | 'importAnyway';
 type ImportDuplicateInfo = { source: 'database' | 'workbook'; applicationId?: string; rowNumber?: number; matchedOn: string } | null;
 type ImportFieldDiff = { field: ImportTargetField; presence: 'supplied' | 'blank' | 'unmapped'; previousValue: string | null; newValue: string | null; kind: 'preserved' | 'unchanged' | 'changed' | 'clear' };
-type ImportResumeMatch = { id: string; name: string } | null;
 type ImportRelatedRecordEffect = { record: 'stage' | 'nextAction' | 'assessment' | 'interview' | 'offer' | 'outcome'; kind: 'create' | 'update' | 'retain' | 'change'; description: string };
 type ImportPreviewRow = {
   rowNumber: number;
@@ -81,7 +55,6 @@ type ImportPreviewRow = {
   suggestedAction: ImportRowDecision | 'error' | 'blank';
   diff: ImportFieldDiff[] | null;
   effects: ImportRelatedRecordEffect[] | null;
-  resumeMatch: ImportResumeMatch;
 };
 type ImportPreviewResponse = {
   sheetNames: string[];
@@ -92,7 +65,6 @@ type ImportPreviewResponse = {
   rows: ImportPreviewRow[];
   summary: { total: number; valid: number; invalid: number; blank: number; duplicatesDatabase: number; duplicatesWorkbook: number; warnings: number };
 };
-type ImportResumeDecision = { action: 'existing'; resumeVersionId: string } | { action: 'create'; name: string; targetType: string } | { action: 'blank' };
 
 type QuickAction = 'apply' | 'oaReceived' | 'oaCompleted' | 'interviewReceived' | 'interviewCompleted' | 'reject' | 'offer' | 'note' | 'contact' | 'setApplicationDate';
 
@@ -107,28 +79,6 @@ const quickActionTitles: Record<QuickAction, string> = {
   note: 'Add Note',
   contact: 'Add Contact',
   setApplicationDate: 'Set Application Date',
-};
-
-const statusToneClass = (status: string) => {
-  switch (status) {
-    case 'Offer':
-    case 'Accepted':
-      return 'bg-emerald-50 text-emerald-600';
-    case 'Rejected':
-    case 'Withdrawn':
-    case 'Closed':
-      return 'bg-rose-50 text-rose-600';
-    case 'OA':
-      return 'bg-amber-50 text-amber-600';
-    case 'Recruiter Screen':
-    case 'Technical Interview':
-    case 'Final Round':
-      return 'bg-sky-50 text-sky-600';
-    case 'Applied':
-      return 'bg-indigo-50 text-indigo-600';
-    default:
-      return 'bg-[#fadde1] text-[#ff97b7]';
-  }
 };
 
 const FieldError = ({ errors, name }: { errors: Record<string, string[] | undefined>; name: string }) => {
@@ -162,7 +112,7 @@ const browserTimeZone = (): string => {
   }
 };
 
-const sections = [
+const sections: SidebarSection[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutGrid },
   { key: 'applications', label: 'Applications', icon: BriefcaseBusiness },
   { key: 'pipeline', label: 'Pipeline', icon: FolderOpen },
@@ -170,7 +120,6 @@ const sections = [
   { key: 'job-descriptions', label: 'Job Descriptions', icon: FileText },
   { key: 'interviews', label: 'Interviews', icon: MessageSquareText },
   { key: 'contacts', label: 'Contacts', icon: Users },
-  { key: 'resumes', label: 'Resume Versions', icon: FileStack },
   { key: 'activity', label: 'Activity', icon: Activity },
   { key: 'import-export', label: 'Import / Export', icon: Download },
   { key: 'settings', label: 'Settings', icon: Settings },
@@ -180,23 +129,21 @@ export default function TrackerShell() {
   const [activeSection, setActiveSection] = useState('dashboard');
   const [applications, setApplications] = useState<ApplicationRecord[]>([]);
   const [profile, setProfile] = useState<ProfileRecord | null>(null);
-  const [resumes, setResumes] = useState<ResumeRecord[]>([]);
   const [search, setSearch] = useState('');
+  const [deadlineFilter, setDeadlineFilter] = useState<'all' | 'overdue' | 'thisWeek' | 'later' | 'none'>('all');
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
   const [showNewModal, setShowNewModal] = useState(false);
   const [showQuickModal, setShowQuickModal] = useState(false);
-  const [showResumeModal, setShowResumeModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showJsonImportModal, setShowJsonImportModal] = useState(false);
   const [quickAction, setQuickAction] = useState<QuickAction>('apply');
   const [newForm, setNewForm] = useState({ company:'', role:'', applicationUrl:'', priority:'P2', status:'Not Applied', location:'', notes:'' });
-  const [resumeForm, setResumeForm] = useState({ name:'', targetType:'', fileName:'', description:'' });
-  const [resumeErrors, setResumeErrors] = useState<Record<string, string[] | undefined>>({});
   const [quickForm, setQuickForm] = useState<Record<string, string>>({});
   const [quickErrors, setQuickErrors] = useState<Record<string, string[] | undefined>>({});
   const [pendingOverride, setPendingOverride] = useState(false);
   const [importFileHandle, setImportFileHandle] = useState<File | null>(null);
   const [importPreview, setImportPreview] = useState<ImportPreviewResponse | null>(null);
   const [importRowActions, setImportRowActions] = useState<Record<number, ImportRowDecision>>({});
-  const [importResumeDecisions, setImportResumeDecisions] = useState<Record<number, ImportResumeDecision>>({});
   const [importConfirmedClears, setImportConfirmedClears] = useState<Record<number, Set<ImportTargetField>>>({});
   const [importCommitMode, setImportCommitMode] = useState<'per-row' | 'batch'>('per-row');
   const [importNextActionDueKindOverride, setImportNextActionDueKindOverride] = useState<'date' | 'timestamp' | ''>('');
@@ -224,21 +171,27 @@ export default function TrackerShell() {
     errors: Array<{ sheet: string; rowNumber: number; message: string }>;
   } | null>(null);
   const [loading, setLoading] = useState(true);
+  // Only the very first load shows the full-page "Loading tracker data…"
+  // skeleton (which unmounts the whole main content area, including the
+  // Applications table). Every subsequent refresh — e.g. after adding a
+  // note or link — refetches silently in the background instead, so the
+  // ApplicationsTable subtree stays mounted and doesn't lose its own local
+  // state (like which drawer tab is open) on every mutation.
+  const hasLoadedOnce = useRef(false);
 
   const loadData = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedOnce.current) setLoading(true);
     try {
-      const [appsRes, profileRes, resumesRes] = await Promise.all([
+      const [appsRes, profileRes] = await Promise.all([
         fetch('/api/applications'),
         fetch('/api/profile'),
-        fetch('/api/resumes'),
       ]);
-      const [appsData, profileData, resumesData] = await Promise.all([appsRes.json(), profileRes.json(), resumesRes.json()]);
+      const [appsData, profileData] = await Promise.all([appsRes.json(), profileRes.json()]);
       setApplications(appsData);
       setProfile(profileData);
-      setResumes(resumesData);
     } finally {
       setLoading(false);
+      hasLoadedOnce.current = true;
     }
   }, []);
 
@@ -250,8 +203,16 @@ export default function TrackerShell() {
 
   useEffect(() => { window.localStorage.setItem('tracker-section', activeSection); }, [activeSection]);
 
+  // Auto-selects the first application only on initial load, purely as a
+  // convenience so the page doesn't open on an empty drawer. Runs once (via
+  // the ref) — otherwise every subsequent data refresh would re-fire this
+  // effect and undo an explicit close (selectedAppId -> null), making the
+  // drawer's close button a no-op.
+  const initialAutoSelectDone = useRef(false);
   useEffect(() => {
-    if (applications.length && !selectedAppId) setSelectedAppId(applications[0].id);
+    if (!applications.length || initialAutoSelectDone.current) return;
+    initialAutoSelectDone.current = true;
+    if (!selectedAppId) setSelectedAppId(applications[0].id);
   }, [applications, selectedAppId]);
 
   const selectedApp = useMemo(() => applications.find((app) => app.id === selectedAppId) ?? null, [applications, selectedAppId]);
@@ -281,27 +242,37 @@ export default function TrackerShell() {
 
   const deadlineTimeZone = browserTimeZone();
 
-  const deadlines = useMemo(() => applications
-    .filter((app) => app.nextActionDue || app.applicationDeadline)
-    .map((app) => ({
-      id: app.id,
-      label: app.nextActionDue ? `Next action • ${app.nextAction}` : `Deadline • ${app.company}`,
-      dueDate: app.nextActionDue ?? app.applicationDeadline ?? null,
-      // applicationDeadline (the fallback when there's no nextActionDue) is
-      // always a calendar date; nextActionDue's kind is tracked explicitly
-      // per-application since it can be either, depending on which workflow
-      // last set it (see nextActionDueKind on the Application model).
-      dueDateKind: (app.nextActionDue ? app.nextActionDueKind : 'date') as DeadlineKind,
-      company: app.company,
-      role: app.role,
-    }))
-    .sort((a, b) => {
-      const aInstant = resolveDeadlineInstant(a.dueDate, a.dueDateKind, deadlineTimeZone);
-      const bInstant = resolveDeadlineInstant(b.dueDate, b.dueDateKind, deadlineTimeZone);
-      if (!aInstant || !bInstant) return 0;
-      return aInstant.getTime() - bInstant.getTime();
-    })
-    .slice(0, 8), [applications, deadlineTimeZone]);
+  // Personal deadlines only — `nextActionDue` is the user's OWN action
+  // deadline; `applicationDeadline` (the employer's official deadline) is
+  // shown only as secondary context, never part of this ordering. Terminal
+  // applications (Accepted/Rejected/Withdrawn/Closed) have no ongoing
+  // personal action, so they're excluded here entirely.
+  const activeApplications = useMemo(
+    () => applications.filter((app) => !(TERMINAL_STATUSES as readonly string[]).includes(app.status)),
+    [applications],
+  );
+  const deadlines = useMemo(
+    () => sortByPersonalDeadline(activeApplications.filter((app) => app.nextActionDue), deadlineTimeZone).slice(0, 8),
+    [activeApplications, deadlineTimeZone],
+  );
+
+  // The Deadlines tab itself: every active record (not just the first
+  // eight), sorted overdue-first-then-ascending by the personal deadline,
+  // with the official applicationDeadline shown only as secondary context —
+  // filterable by overdue / this week / later / no personal deadline.
+  const allDeadlines = useMemo(() => sortByPersonalDeadline(activeApplications, deadlineTimeZone), [activeApplications, deadlineTimeZone]);
+  const filteredDeadlines = useMemo(() => allDeadlines.filter((app) => {
+    if (deadlineFilter === 'all') return true;
+    if (deadlineFilter === 'none') return !app.nextActionDue;
+    if (!app.nextActionDue) return false;
+    const overdue = isPersonalDeadlineOverdue(app, deadlineTimeZone);
+    if (deadlineFilter === 'overdue') return overdue;
+    const instant = resolveDeadlineInstant(app.nextActionDue, app.nextActionDueKind, deadlineTimeZone);
+    const withinWeek = instant ? instant.getTime() - Date.now() <= 7 * 86400000 : false;
+    if (deadlineFilter === 'thisWeek') return !overdue && withinWeek;
+    if (deadlineFilter === 'later') return !overdue && !withinWeek;
+    return true;
+  }), [allDeadlines, deadlineFilter, deadlineTimeZone]);
 
   const createApp = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -404,7 +375,7 @@ export default function TrackerShell() {
     const response = await fetch(`/api/applications/${selectedApp.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'description', fullText: quickForm.fullText ?? '', minimumQualifications: quickForm.minimumQualifications ?? '', preferredQualifications: quickForm.preferredQualifications ?? '', keywords: quickForm.keywords ?? '' }),
+      body: JSON.stringify({ action: 'description', fullText: quickForm.fullText ?? '', sourceUrl: quickForm.sourceUrl ?? '', keywords: quickForm.keywords ?? '' }),
     });
     if (response.ok) {
       toast.success('Job description saved');
@@ -440,14 +411,11 @@ export default function TrackerShell() {
       }
       setImportPreview(data);
       const initialActions: Record<number, ImportRowDecision> = {};
-      const initialResumeDecisions: Record<number, ImportResumeDecision> = {};
       for (const row of data.rows as ImportPreviewRow[]) {
         if (row.status !== 'valid') continue;
         initialActions[row.rowNumber] = (row.suggestedAction as ImportRowDecision) ?? 'create';
-        initialResumeDecisions[row.rowNumber] = row.resumeMatch ? { action: 'existing', resumeVersionId: row.resumeMatch.id } : { action: 'blank' };
       }
       setImportRowActions(initialActions);
-      setImportResumeDecisions(initialResumeDecisions);
       setImportConfirmedClears({});
     } finally {
       setImportLoading(false);
@@ -492,7 +460,6 @@ export default function TrackerShell() {
     setImportFileHandle(null);
     setImportPreview(null);
     setImportRowActions({});
-    setImportResumeDecisions({});
     setImportConfirmedClears({});
   };
 
@@ -507,7 +474,6 @@ export default function TrackerShell() {
           action: importRowActions[row.rowNumber] ?? 'create',
           data: row.data,
           matchedApplicationId: row.duplicate?.source === 'database' ? row.duplicate.applicationId ?? null : null,
-          resumeVersionDecision: importResumeDecisions[row.rowNumber],
           confirmedClears: Array.from(importConfirmedClears[row.rowNumber] ?? []),
         }));
 
@@ -616,59 +582,18 @@ export default function TrackerShell() {
     if (response.ok) toast.success('Profile saved');
   };
 
-  const createResume = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setResumeErrors({});
-    const response = await fetch('/api/resumes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: resumeForm.name,
-        targetType: resumeForm.targetType,
-        fileName: resumeForm.fileName || null,
-        description: resumeForm.description || null,
-      }),
-    });
-    if (response.ok) {
-      toast.success('Resume created');
-      setShowResumeModal(false);
-      setResumeForm({ name:'', targetType:'', fileName:'', description:'' });
-      setResumeErrors({});
-      await loadData();
-    } else {
-      const data = await response.json();
-      if (data?.errors) {
-        setResumeErrors(data.errors);
-        toast.error('Please fix the highlighted fields');
-      } else {
-        toast.error(data?.error ?? 'Unable to create resume');
-      }
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[#fadde1] text-slate-800">
       <div className="flex min-h-screen flex-col lg:flex-row">
-        <aside className="w-full border-b border-[#ffcad4] bg-white p-6 lg:w-72 lg:border-b-0 lg:border-r">
-          <div className="mb-6">
-            <p className="text-xs uppercase tracking-[0.3em] text-[#ffa6c1]">Recruiting Workspace</p>
-            <h1 className="mt-2 text-xl font-semibold text-slate-900">Pipeline</h1>
-          </div>
-          <button onClick={() => setShowNewModal(true)} className="mb-6 flex w-full items-center justify-center gap-2 rounded-lg bg-[#ff87ab] px-4 py-3 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f]">
-            <PlusCircle size={18} /> New Opportunity
-          </button>
-          <nav className="space-y-1">
-            {sections.map((section) => {
-              const Icon = section.icon;
-              return (
-                <button key={section.key} onClick={() => setActiveSection(section.key)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${activeSection === section.key ? 'bg-[#ff87ab] text-slate-900' : 'text-slate-600 hover:bg-[#fadde1] hover:text-[#ff5d8f]'}`}>
-                  <Icon size={16} /> {section.label}
-                </button>
-              );
-            })}
-          </nav>
-        </aside>
-        <main className="flex-1 p-6 lg:p-8">
+        <Sidebar
+          sections={sections}
+          activeSection={activeSection}
+          onSelectSection={setActiveSection}
+          onNewOpportunity={() => setShowNewModal(true)}
+          onPasteImport={() => setShowJsonImportModal(true)}
+          profileName={profile?.name}
+        />
+        <main className="min-w-0 flex-1 p-6 lg:p-8">
           <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-sm text-slate-500">{profile?.name ?? 'Riddhima Yadav'}</p>
@@ -723,9 +648,11 @@ export default function TrackerShell() {
                           <button key={item.id} onClick={() => { setSelectedAppId(item.id); setActiveSection('applications'); }} className="flex w-full items-center justify-between rounded-lg border border-[#ffcad4] bg-white p-3 text-left transition hover:border-[#ffacc5] hover:bg-[#fadde1]/60">
                             <div>
                               <p className="font-medium">{item.company}</p>
-                              <p className="text-sm text-slate-500">{item.label}</p>
+                              <p className="text-sm text-slate-500">My deadline • {item.nextAction}</p>
                             </div>
-                            <div className="text-sm text-slate-600">{item.dueDate ? formatByKind(item.dueDate, item.dueDateKind, 'MMM d') : '—'}</div>
+                            <div className={`text-sm ${isPersonalDeadlineOverdue(item, deadlineTimeZone) ? 'font-medium text-rose-600' : 'text-slate-600'}`}>
+                              {item.nextActionDue ? formatByKind(item.nextActionDue, item.nextActionDueKind, 'MMM d') : '—'}
+                            </div>
                           </button>
                         ))}
                       </div>
@@ -733,7 +660,7 @@ export default function TrackerShell() {
                     <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
                       <h3 className="text-lg font-semibold">Needs attention</h3>
                       <div className="mt-4 space-y-3">
-                        {applications.filter((app) => isDeadlineOverdue(app.nextActionDue, app.nextActionDueKind, browserTimeZone()) || !app.jobDescription || !app.resumeVersion).slice(0, 6).map((app) => (
+                        {activeApplications.filter((app) => isPersonalDeadlineOverdue(app, deadlineTimeZone)).slice(0, 6).map((app) => (
                           <div key={app.id} className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-sm">
                             <div className="font-medium">{app.company}</div>
                             <div className="text-amber-800">{app.nextAction ?? 'Review this opportunity'}</div>
@@ -746,112 +673,51 @@ export default function TrackerShell() {
               )}
 
               {activeSection === 'applications' && (
-                <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
-                  <div className="rounded-xl border border-[#ffcad4] bg-white p-4 shadow-sm">
-                    <div className="mb-4 flex items-center justify-between">
-                      <h3 className="text-lg font-semibold">Applications</h3>
-                      <button onClick={() => setShowNewModal(true)} className="rounded-lg border border-[#ffc4d6] bg-white px-3 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1] hover:text-[#ff5d8f]">+ New</button>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="min-w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-[#ffcad4] text-left text-[#ffa6c1]">
-                            <th className="px-3 py-2">Company</th>
-                            <th className="px-3 py-2">Role</th>
-                            <th className="px-3 py-2">Status</th>
-                            <th className="px-3 py-2">Next action</th>
-                            <th className="px-3 py-2">Due</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredApplications.map((app) => (
-                            <tr key={app.id} onClick={() => setSelectedAppId(app.id)} className={`cursor-pointer border-b border-[#fadde1] transition ${selectedAppId === app.id ? 'bg-[#fadde1]' : 'hover:bg-[#fadde1]/60'}`}>
-                              <td className="px-3 py-3 font-medium">{app.company}</td>
-                              <td className="px-3 py-3">{app.role}</td>
-                              <td className="px-3 py-3"><span className={`rounded-full px-2 py-1 text-xs font-medium ${statusToneClass(app.status)}`}>{app.status}</span></td>
-                              <td className="px-3 py-3">{app.nextAction}</td>
-                              <td className="px-3 py-3">{app.nextActionDue ? formatByKind(app.nextActionDue, app.nextActionDueKind, 'MMM d') : '—'}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                <div className="space-y-4">
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      data-testid="paste-application-import-button"
+                      onClick={() => setShowJsonImportModal(true)}
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+                    >
+                      Paste Application Import
+                    </button>
+                    <button onClick={() => setShowNewModal(true)} className="rounded-lg border border-[#ffc4d6] bg-white px-3 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1] hover:text-[#ff5d8f]">+ New</button>
                   </div>
-                  <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
-                    {selectedApp ? (
+                  <ApplicationsTable
+                    applications={filteredApplications}
+                    selectedAppId={selectedAppId}
+                    onSelect={setSelectedAppId}
+                    onEdit={(app) => { setSelectedAppId(app.id); setShowEditModal(true); }}
+                    onChanged={loadData}
+                    timeZone={browserTimeZone()}
+                    renderActionsTab={(app) => (
                       <>
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm text-slate-500">{selectedApp.applicationCode}</p>
-                            <h3 className="text-xl font-semibold">{selectedApp.company}</h3>
-                            <p className="text-sm text-slate-600">{selectedApp.role}</p>
+                        {isMissingApplicationDate(app) && (
+                          <div data-testid="missing-date-applied-warning" className="w-full rounded-lg border border-amber-100 bg-amber-50 p-3 text-sm text-amber-700">
+                            <p>This application is marked &ldquo;{app.status}&rdquo; but has no application date recorded — likely from an import.</p>
+                            <button
+                              onClick={() => openQuickAction('setApplicationDate')}
+                              className="mt-2 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium text-amber-800 transition hover:bg-amber-100"
+                            >
+                              Set Application Date
+                            </button>
                           </div>
-                          <span className="rounded-full bg-[#fadde1] px-2 py-1 text-xs font-medium text-[#ff97b7]">{selectedApp.priority}</span>
-                        </div>
-                        <div className="mt-4 space-y-3 text-sm text-slate-600">
-                          <div className="rounded-lg border border-[#ffcad4] bg-white p-3">Status: <span data-testid="app-status" className={`rounded-full px-2 py-0.5 font-medium ${statusToneClass(selectedApp.status)}`}>{selectedApp.status}</span></div>
-                          <div className="rounded-lg border border-[#ffcad4] bg-white p-3">Stage: <span className="font-medium text-slate-900">{selectedApp.currentStage}</span></div>
-                          <div className="rounded-lg border border-[#ffcad4] bg-white p-3">Next action: <span className="font-medium text-slate-900">{selectedApp.nextAction}</span></div>
-                          <div className="rounded-lg border border-[#ffcad4] bg-white p-3">Last update: <span className="font-medium text-slate-900">{formatDistanceToNow(new Date(selectedApp.updatedAt), { addSuffix: true })}</span></div>
-                          {selectedApp.dateApplied && (
-                            <div className="rounded-lg border border-[#ffcad4] bg-white p-3">Date applied: <span data-testid="date-applied" className="font-medium text-slate-900">{formatDateOnly(selectedApp.dateApplied)}</span></div>
-                          )}
-                          {isMissingApplicationDate(selectedApp) && (
-                            <div data-testid="missing-date-applied-warning" className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-amber-700">
-                              <p>This application is marked &ldquo;{selectedApp.status}&rdquo; but has no application date recorded — likely from an import.</p>
-                              <button
-                                onClick={() => openQuickAction('setApplicationDate')}
-                                className="mt-2 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium text-amber-800 transition hover:bg-amber-100"
-                              >
-                                Set Application Date
-                              </button>
-                            </div>
-                          )}
-                          {selectedApp.offers && (
-                            <div className="rounded-lg border border-emerald-100 bg-emerald-50 p-3">
-                              <p className="font-medium text-emerald-900">Offer details</p>
-                              <p>Offer date: <span data-testid="offer-date" className="font-medium text-slate-900">{formatDateOnly(selectedApp.offers.offerDate)}</span></p>
-                              <p>Decision deadline: <span data-testid="offer-deadline" className="font-medium text-slate-900">{formatDateOnly(selectedApp.offers.decisionDeadline)}</span></p>
-                              <p>Compensation: <span data-testid="offer-compensation" className="font-medium text-slate-900">{selectedApp.offers.compensationSummary ?? '—'}</span></p>
-                              <p>Notes: <span data-testid="offer-notes" className="font-medium text-slate-900">{selectedApp.offers.notes ?? '—'}</span></p>
-                            </div>
-                          )}
-                          {selectedApp.assessments.map((assessment) => (
-                            <div key={assessment.id} data-testid="assessment-detail" className="rounded-lg border border-sky-100 bg-sky-50 p-3">
-                              <p className="font-medium text-sky-900">{assessment.type} assessment</p>
-                              {assessment.dueAt && (
-                                <p>Due: <span className="font-medium text-slate-900">
-                                  {formatInZone(assessment.dueAt, assessment.timezone, 'MMM d, yyyy h:mm a zzz')}
-                                  {assessment.timezone && assessment.timezone !== browserTimeZone() && (
-                                    <> ({formatTimestamp(assessment.dueAt, 'MMM d, h:mm a')} your time)</>
-                                  )}
-                                </span></p>
-                              )}
-                              <p>Platform: <span className="font-medium text-slate-900">{assessment.platform ?? '—'}</span></p>
-                              <p>Duration: <span className="font-medium text-slate-900">{assessment.durationMinutes ? `${assessment.durationMinutes} min` : '—'}</span></p>
-                              <p>Questions: <span className="font-medium text-slate-900">{assessment.questionCount ?? '—'}</span></p>
-                              <p>Topics: <span className="font-medium text-slate-900">{assessment.topics ?? '—'}</span></p>
-                              <p>Status: <span className="font-medium text-slate-900">{assessment.completedAt ? `Completed ${formatTimestamp(assessment.completedAt, 'MMM d, yyyy')}` : 'In progress'}</span></p>
-                              {assessment.completedAt && <p>Result: <span className="font-medium text-slate-900">{assessment.result ?? '—'}</span></p>}
-                            </div>
-                          ))}
-                        </div>
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          {renderWorkflowButton(selectedApp, 'apply', 'Mark Applied', { resumeVersionId: selectedApp.resumeVersion?.id ?? '' })}
-                          {renderWorkflowButton(selectedApp, 'oaReceived', 'OA Received', { timezone: browserTimeZone() })}
-                          {selectedApp.assessments.some((assessment) => assessment.type === 'OA' && !assessment.completedAt) &&
-                            renderWorkflowButton(selectedApp, 'oaCompleted', 'OA Completed', { assessmentId: '' })}
-                          {renderWorkflowButton(selectedApp, 'interviewReceived', 'Interview Received', { timezone: browserTimeZone() })}
-                          {selectedApp.interviews.some((interview) => !interview.completedAt) &&
-                            renderWorkflowButton(selectedApp, 'interviewCompleted', 'Interview Completed', { interviewId: '' })}
-                          {renderWorkflowButton(selectedApp, 'reject', 'Rejected')}
-                          {renderWorkflowButton(selectedApp, 'offer', 'Offer Received')}
-                          <button onClick={() => openQuickAction('note')} className="rounded-lg border border-[#ffc4d6] bg-white px-3 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1] hover:text-[#ff5d8f]">Add Note</button>
-                          <button onClick={() => openQuickAction('contact')} className="rounded-lg border border-[#ffc4d6] bg-white px-3 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1] hover:text-[#ff5d8f]">Add Contact</button>
-                        </div>
+                        )}
+                        {renderWorkflowButton(app, 'apply', 'Mark Applied')}
+                        {renderWorkflowButton(app, 'oaReceived', 'OA Received', { timezone: browserTimeZone() })}
+                        {app.assessments.some((assessment) => assessment.type === 'OA' && !assessment.completedAt) &&
+                          renderWorkflowButton(app, 'oaCompleted', 'OA Completed', { assessmentId: '' })}
+                        {renderWorkflowButton(app, 'interviewReceived', 'Interview Received', { timezone: browserTimeZone() })}
+                        {app.interviews.some((interview) => !interview.completedAt) &&
+                          renderWorkflowButton(app, 'interviewCompleted', 'Interview Completed', { interviewId: '' })}
+                        {renderWorkflowButton(app, 'reject', 'Rejected')}
+                        {renderWorkflowButton(app, 'offer', 'Offer Received')}
+                        <button onClick={() => openQuickAction('note')} className="rounded-lg border border-[#ffc4d6] bg-white px-3 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1] hover:text-[#ff5d8f]">Add Note</button>
+                        <button onClick={() => openQuickAction('contact')} className="rounded-lg border border-[#ffc4d6] bg-white px-3 py-2 text-sm text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1] hover:text-[#ff5d8f]">Add Contact</button>
                       </>
-                    ) : <div className="text-sm text-slate-500">Select an application</div>}
-                  </div>
+                    )}
+                  />
                 </div>
               )}
 
@@ -876,17 +742,38 @@ export default function TrackerShell() {
 
               {activeSection === 'deadlines' && (
                 <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
-                  <h3 className="text-lg font-semibold">Deadlines</h3>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-lg font-semibold">Deadlines</h3>
+                    <select value={deadlineFilter} onChange={(e) => setDeadlineFilter(e.target.value as typeof deadlineFilter)} className="rounded-lg border border-[#ffc4d6] bg-white p-2 text-sm">
+                      <option value="all">All active</option>
+                      <option value="overdue">Overdue</option>
+                      <option value="thisWeek">This week</option>
+                      <option value="later">Later</option>
+                      <option value="none">No personal deadline</option>
+                    </select>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500">Sorted by MY deadline (overdue first, then soonest) — the official employer deadline is shown for context only.</p>
                   <div className="mt-4 space-y-3">
-                    {deadlines.map((item) => (
-                      <div key={item.id} className="flex items-center justify-between rounded-lg border border-[#ffcad4] bg-white p-3 text-sm">
+                    {filteredDeadlines.map((app) => (
+                      <button
+                        key={app.id}
+                        onClick={() => { setSelectedAppId(app.id); setActiveSection('applications'); }}
+                        data-testid="deadline-row"
+                        className="flex w-full items-center justify-between rounded-lg border border-[#ffcad4] bg-white p-3 text-left text-sm transition hover:border-[#ffacc5] hover:bg-[#fadde1]/60"
+                      >
                         <div>
-                          <div className="font-medium">{item.company}</div>
-                          <div className="text-slate-500">{item.label}</div>
+                          <div className="font-medium">{app.company} — {app.role}</div>
+                          <div className="text-slate-500">{app.nextAction ?? 'Review this opportunity'}</div>
                         </div>
-                        <div className="text-slate-600">{item.dueDate ? formatByKind(item.dueDate, item.dueDateKind) : '—'}</div>
-                      </div>
+                        <div className="text-right">
+                          <div className={isPersonalDeadlineOverdue(app, deadlineTimeZone) ? 'font-medium text-rose-600' : 'text-slate-700'}>
+                            My deadline: {app.nextActionDue ? formatByKind(app.nextActionDue, app.nextActionDueKind, 'MMM d, yyyy') : '—'}
+                          </div>
+                          <div className="text-xs text-slate-400">Official deadline: {app.applicationDeadline ? formatDateOnly(app.applicationDeadline) : '—'}</div>
+                        </div>
+                      </button>
                     ))}
+                    {filteredDeadlines.length === 0 && <p className="text-sm text-slate-500">No applications match this filter.</p>}
                   </div>
                 </div>
               )}
@@ -910,10 +797,10 @@ export default function TrackerShell() {
                       <div className="mt-4 space-y-3">
                         <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="jd-full-text">Full job description</label>
                         <textarea id="jd-full-text" value={quickForm.fullText ?? selectedApp.jobDescription?.fullText ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, fullText: e.target.value }))} rows={10} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Paste the full job description" />
-                        <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="jd-min-quals">Minimum qualifications</label>
-                        <textarea id="jd-min-quals" value={quickForm.minimumQualifications ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, minimumQualifications: e.target.value }))} rows={4} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Minimum qualifications" />
-                        <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="jd-preferred-quals">Preferred qualifications</label>
-                        <textarea id="jd-preferred-quals" value={quickForm.preferredQualifications ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, preferredQualifications: e.target.value }))} rows={4} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Preferred qualifications" />
+                        <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="jd-source-url">Source URL</label>
+                        <input id="jd-source-url" value={quickForm.sourceUrl ?? selectedApp.jobDescription?.sourceUrl ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, sourceUrl: e.target.value }))} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="https://…" />
+                        <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="jd-keywords">Keywords / tags</label>
+                        <input id="jd-keywords" value={quickForm.keywords ?? selectedApp.jobDescription?.keywords ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, keywords: e.target.value }))} className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="e.g. Python, distributed systems, backend" />
                         <button onClick={saveJobDescription} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f]">Save description</button>
                       </div>
                     ) : <div className="text-sm text-slate-500">Select an application</div>}
@@ -959,21 +846,6 @@ export default function TrackerShell() {
                 </div>
               )}
 
-              {activeSection === 'resumes' && (
-                <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
-                  <h3 className="text-lg font-semibold">Resume versions</h3>
-                  <div className="mt-4 space-y-3">
-                    <button onClick={() => { setResumeErrors({}); setShowResumeModal(true); }} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm transition hover:bg-[#ff5d8f]">Create Resume</button>
-                    {resumes.map((resume) => (
-                      <div key={resume.id} className="rounded-lg border border-[#ffcad4] bg-white p-3 text-sm transition hover:border-[#ffc4d6] hover:bg-[#fadde1]/50">
-                        <div className="font-medium">{resume.name}</div>
-                        <div className="text-slate-500">{resume.targetType} • {resume.fileName}</div>
-                        <div className="text-slate-500">Used by {resume.applications.length} application(s)</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {activeSection === 'activity' && (
                 <div className="rounded-xl border border-[#ffcad4] bg-white p-6 shadow-sm">
@@ -1183,7 +1055,6 @@ export default function TrackerShell() {
                           <tbody>
                             {importPreview.rows.filter((row) => row.status !== 'blank').map((row) => {
                               const action = importRowActions[row.rowNumber] ?? 'create';
-                              const resumeNameSupplied = typeof row.data?.resumeVersionName === 'string' && row.data.resumeVersionName;
                               return (
                               <tr key={row.rowNumber} data-testid="import-preview-row" className="border-b border-[#fadde1] align-top">
                                 <td className="px-2 py-2 text-slate-500">{row.rowNumber}</td>
@@ -1242,27 +1113,6 @@ export default function TrackerShell() {
                                     </div>
                                   )}
 
-                                  {resumeNameSupplied && !row.resumeMatch && (
-                                    <div className="mt-2">
-                                      <select
-                                        data-testid="import-resume-decision"
-                                        value={importResumeDecisions[row.rowNumber]?.action ?? 'blank'}
-                                        onChange={(e) => {
-                                          const value = e.target.value;
-                                          setImportResumeDecisions((prev) => ({
-                                            ...prev,
-                                            [row.rowNumber]: value === 'create'
-                                              ? { action: 'create', name: resumeNameSupplied, targetType: 'SWE' }
-                                              : { action: 'blank' },
-                                          }));
-                                        }}
-                                        className="rounded-lg border border-[#ffc4d6] bg-white p-1 text-xs outline-none focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]"
-                                      >
-                                        <option value="blank">Leave resume blank</option>
-                                        <option value="create">Create new resume &ldquo;{resumeNameSupplied}&rdquo;</option>
-                                      </select>
-                                    </div>
-                                  )}
                                 </td>
                                 <td className="px-2 py-2">
                                   {row.status === 'valid' ? (
@@ -1440,14 +1290,6 @@ export default function TrackerShell() {
                   <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="date-applied">Date applied</label>
                   <input id="date-applied" type="date" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={quickForm.dateApplied ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, dateApplied: e.target.value }))} />
                   <FieldError errors={quickErrors} name="dateApplied" />
-                  <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="resume-version">Resume version</label>
-                  <select id="resume-version" required className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" value={quickForm.resumeVersionId ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, resumeVersionId: e.target.value }))}>
-                    <option value="">Select a resume version</option>
-                    {resumes.map((resume) => (
-                      <option key={resume.id} value={resume.id}>{resume.name}</option>
-                    ))}
-                  </select>
-                  <FieldError errors={quickErrors} name="resumeVersionId" />
                   <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="email-used">Email used</label>
                   <input id="email-used" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Email used" value={quickForm.emailUsed ?? ''} onChange={(e) => setQuickForm((prev) => ({ ...prev, emailUsed: e.target.value }))} />
                   <FieldError errors={quickErrors} name="emailUsed" />
@@ -1669,37 +1511,19 @@ export default function TrackerShell() {
         </div>
       )}
 
-      {showResumeModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl border border-[#ffcad4] bg-white p-6 shadow-xl">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xl font-semibold text-slate-900">Create Resume</h3>
-              <button onClick={() => setShowResumeModal(false)} className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-[#fadde1] hover:text-[#ff97b7]">✕</button>
-            </div>
-            <form onSubmit={createResume} className="mt-4 space-y-3">
-              <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="resume-name">Resume name</label>
-              <input id="resume-name" required className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Resume name" value={resumeForm.name} onChange={(e) => setResumeForm({ ...resumeForm, name: e.target.value })} />
-              {resumeErrors.name && <p className="text-sm text-rose-600">{resumeErrors.name[0]}</p>}
+      {showEditModal && selectedApp && (
+        <EditApplicationModal
+          application={selectedApp}
+          onClose={() => setShowEditModal(false)}
+          onSaved={loadData}
+        />
+      )}
 
-              <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="resume-target-type">Target type</label>
-              <input id="resume-target-type" required className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="Target role" value={resumeForm.targetType} onChange={(e) => setResumeForm({ ...resumeForm, targetType: e.target.value })} />
-              {resumeErrors.targetType && <p className="text-sm text-rose-600">{resumeErrors.targetType[0]}</p>}
-
-              <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="resume-file-name">File name</label>
-              <input id="resume-file-name" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" placeholder="File name" value={resumeForm.fileName} onChange={(e) => setResumeForm({ ...resumeForm, fileName: e.target.value })} />
-              {resumeErrors.fileName && <p className="text-sm text-rose-600">{resumeErrors.fileName[0]}</p>}
-
-              <label className="block text-sm font-medium text-[#ff5d8f]/80" htmlFor="resume-description">Description</label>
-              <textarea id="resume-description" className="w-full rounded-lg border border-[#ffc4d6] bg-white p-3 text-sm text-slate-700 outline-none transition focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]" rows={3} placeholder="Description" value={resumeForm.description} onChange={(e) => setResumeForm({ ...resumeForm, description: e.target.value })} />
-              {resumeErrors.description && <p className="text-sm text-rose-600">{resumeErrors.description[0]}</p>}
-
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => setShowResumeModal(false)} className="rounded-lg border border-[#ffc4d6] bg-white px-4 py-2 text-slate-600 transition hover:border-[#ffacc5] hover:bg-[#fadde1]">Cancel</button>
-                <button type="submit" className="rounded-lg bg-[#ff87ab] px-4 py-2 text-slate-900 shadow-sm transition hover:bg-[#ff5d8f]">Save resume</button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {showJsonImportModal && (
+        <JsonImportModal
+          onClose={() => setShowJsonImportModal(false)}
+          onImported={loadData}
+        />
       )}
     </div>
   );

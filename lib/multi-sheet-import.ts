@@ -3,7 +3,8 @@ import {
   isDateOnlyString, isDateTimeLocalString, isValidIanaTimeZone,
   parseDateOnly, parseTimestamp, parseZonedDateTime,
 } from '@/lib/dates';
-import { deriveInitialStage, priorities, statuses, type ApplicationStatus, type Priority } from '@/lib/recruiting';
+import { deriveInitialStage, postingStatuses, priorities, statuses, type ApplicationStatus, type Priority } from '@/lib/recruiting';
+import { linkCategories } from '@/lib/schemas/workflows';
 import { parseWorkbookSheetNames, readWorkbookSheetRows } from '@/lib/import';
 import { EXPORT_FORMAT_VERSION, METADATA_SHEET_NAME, REQUIRED_SHEET_NAMES } from '@/lib/export-format';
 
@@ -32,6 +33,7 @@ const SHEET_NAMES = {
   resumeVersions: 'Resume Versions',
   applications: 'Applications',
   jobDescriptions: 'Job Descriptions',
+  applicationLinks: 'Application Links',
   assessments: 'Assessments',
   interviews: 'Interviews',
   offers: 'Offers',
@@ -127,6 +129,7 @@ export type MultiSheetImportSummary = {
   resumeVersions: { created: number; matched: number };
   applications: { created: number; updated: number };
   jobDescriptions: { created: number };
+  applicationLinks: { created: number };
   assessments: { created: number };
   interviews: { created: number };
   offers: { created: number };
@@ -142,6 +145,7 @@ const zeroedCounts = () => ({
   resumeVersions: { created: 0, matched: 0 },
   applications: { created: 0, updated: 0 },
   jobDescriptions: { created: 0 },
+  applicationLinks: { created: 0 },
   assessments: { created: 0 },
   interviews: { created: 0 },
   offers: { created: 0 },
@@ -240,7 +244,7 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
     // Application), and every child table is checked directly too rather
     // than assumed empty-by-implication, so "empty" means what it says for
     // a disaster-recovery restore.
-    const [resumeVersionCount, profileCount, assessmentCount, interviewCount, offerCount, contactCount, noteCount, activityCount, jobDescriptionCount] = await Promise.all([
+    const [resumeVersionCount, profileCount, assessmentCount, interviewCount, offerCount, contactCount, noteCount, activityCount, jobDescriptionCount, linkCount] = await Promise.all([
       prisma.resumeVersion.count(),
       prisma.userProfile.count(),
       prisma.assessment.count(),
@@ -250,6 +254,7 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
       prisma.note.count(),
       prisma.activity.count(),
       prisma.jobDescription.count(),
+      prisma.applicationLink.count(),
     ]);
     const nonEmpty: string[] = [];
     if (existingApplications.length > 0) nonEmpty.push(`${existingApplications.length} application(s)`);
@@ -262,6 +267,7 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
     if (noteCount > 0) nonEmpty.push(`${noteCount} note(s)`);
     if (activityCount > 0) nonEmpty.push(`${activityCount} activity record(s)`);
     if (jobDescriptionCount > 0) nonEmpty.push(`${jobDescriptionCount} job description(s)`);
+    if (linkCount > 0) nonEmpty.push(`${linkCount} application link(s)`);
 
     if (nonEmpty.length) {
       errors.push({
@@ -311,12 +317,20 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
 
     const applicationUrl = str(row['Application URL']);
     if (applicationUrl && !isValidUrl(applicationUrl)) errors.push({ sheet: 'Applications', rowNumber, message: `Application URL "${applicationUrl}" is not a valid URL` });
+    const candidatePortalUrl = str(row['Candidate Portal URL']);
+    if (candidatePortalUrl && !isValidUrl(candidatePortalUrl)) errors.push({ sheet: 'Applications', rowNumber, message: `Candidate Portal URL "${candidatePortalUrl}" is not a valid URL` });
 
-    for (const [label, key] of [['Application Deadline', 'Application Deadline'], ['Date Found', 'Date Found'], ['Date Applied', 'Date Applied']] as const) {
+    const postingStatus = str(row['Posting Status']);
+    if (postingStatus && !(postingStatuses as readonly string[]).includes(postingStatus)) {
+      errors.push({ sheet: 'Applications', rowNumber, message: `Posting Status "${postingStatus}" is not a recognized posting status` });
+    }
+
+    for (const [label, key] of [['Application Deadline', 'Application Deadline'], ['Date Found', 'Date Found'], ['Date Applied', 'Date Applied'], ['Posting Date', 'Posting Date']] as const) {
       if (!isValidDateOnlyCell(row[key])) errors.push({ sheet: 'Applications', rowNumber, message: `${label} "${row[key]}" is not a real calendar date` });
     }
     if (!isValidTimestampCell(row['Created At'])) errors.push({ sheet: 'Applications', rowNumber, message: `Created At "${row['Created At']}" is not a real date and time` });
     if (!isValidTimestampCell(row['Updated At'])) errors.push({ sheet: 'Applications', rowNumber, message: `Updated At "${row['Updated At']}" is not a real date and time` });
+    if (!isValidTimestampCell(row['Last Verified At'])) errors.push({ sheet: 'Applications', rowNumber, message: `Last Verified At "${row['Last Verified At']}" is not a real date and time` });
 
     const nextActionDueKindRaw = str(row['Next Action Due Kind']);
     const nextActionDue = row['Next Action Due'];
@@ -356,6 +370,19 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
   };
 
   data.jobDescriptions.forEach((row, index) => validateApplicationCodeRef('Job Descriptions', index + 2, row));
+
+  data.applicationLinks.forEach((row, index) => {
+    const rowNumber = index + 2;
+    validateApplicationCodeRef('Application Links', rowNumber, row);
+    if (!str(row['Label'])) errors.push({ sheet: 'Application Links', rowNumber, message: 'Label is required' });
+    const url = str(row['URL']);
+    if (!url) errors.push({ sheet: 'Application Links', rowNumber, message: 'URL is required' });
+    else if (!isValidUrl(url)) errors.push({ sheet: 'Application Links', rowNumber, message: `URL "${url}" is not a valid URL` });
+    const category = str(row['Category']);
+    if (category && !(linkCategories as readonly string[]).includes(category)) {
+      errors.push({ sheet: 'Application Links', rowNumber, message: `Category "${category}" is not a recognized category` });
+    }
+  });
 
   data.assessments.forEach((row, index) => {
     const rowNumber = index + 2;
@@ -474,8 +501,13 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
         // stale/tampered Stage: Discovered.
         currentStage: deriveInitialStage(status),
         priority: (str(row['Priority']) ?? 'P2') as Priority,
+        jobId: str(row['Job ID']),
+        postingStatus: str(row['Posting Status']),
         applicationUrl: str(row['Application URL']),
+        candidatePortalUrl: str(row['Candidate Portal URL']),
         location: str(row['Location']),
+        workModel: str(row['Work Model']),
+        postingDate: parseDateOnly(row['Posting Date']),
         nextAction: str(row['Next Action']),
         nextActionDue,
         nextActionDueKind,
@@ -483,6 +515,19 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
         dateFound: parseDateOnly(row['Date Found']),
         dateApplied: parseDateOnly(row['Date Applied']),
         resumeVersionId,
+        emailUsed: str(row['Login Email']),
+        portalUsername: str(row['Portal Username']),
+        passwordManagerReference: str(row['Password Manager Reference']),
+        confirmationNumber: str(row['Confirmation Number']),
+        // Deliberately reads "Compensation Summary" (the Application's own
+        // field), NOT "Compensation" (that column is the formal Offer
+        // record's compensationSummary, flattened onto this row for
+        // readability only — see export.ts).
+        compensationSummary: str(row['Compensation Summary']),
+        eligibility: str(row['Eligibility']),
+        sponsorship: str(row['Sponsorship']),
+        whyFit: str(row['Why Fit']),
+        lastVerifiedAt: parseTimestamp(row['Last Verified At']),
         outcome: str(row['Outcome']),
         notes: str(row['Notes']),
         archived: isYes(row['Archived']),
@@ -521,6 +566,7 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
       await tx.contact.deleteMany({ where: { applicationId } });
       await tx.note.deleteMany({ where: { applicationId } });
       await tx.activity.deleteMany({ where: { applicationId } });
+      await tx.applicationLink.deleteMany({ where: { applicationId } });
       if (!jdCodesInWorkbook.has(code)) await tx.jobDescription.deleteMany({ where: { applicationId } });
       if (!offerCodesInWorkbook.has(code)) await tx.offer.deleteMany({ where: { applicationId } });
     }
@@ -543,6 +589,21 @@ export async function commitMultiSheetImport(prisma: PrismaClient, parsed: Parse
         update: fields,
       });
       summary.jobDescriptions.created += 1;
+    }
+
+    // --- Application Links (every link — always create, like Assessments/etc) ---
+    for (const row of data.applicationLinks) {
+      const applicationId = resolveApplicationId(row);
+      await tx.applicationLink.create({
+        data: {
+          applicationId,
+          label: str(row['Label'])!,
+          url: str(row['URL'])!,
+          category: str(row['Category']),
+          notes: str(row['Notes']),
+        },
+      });
+      summary.applicationLinks.created += 1;
     }
 
     // --- Assessments (every historical round) -------------------------------

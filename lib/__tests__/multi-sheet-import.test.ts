@@ -45,7 +45,7 @@ const ALL_SHEET_NAMES = [METADATA_SHEET_NAME, ...REQUIRED_SHEET_NAMES];
 
 const emptySheets: MultiSheetWorkbookData = {
   metadata: [{ 'Export Format Version': EXPORT_FORMAT_VERSION, 'Application Version': '0.1.0', 'Export Timestamp': new Date().toISOString(), 'Required Sheets': REQUIRED_SHEET_NAMES.join(', ') }],
-  resumeVersions: [], applications: [], jobDescriptions: [], assessments: [], interviews: [], offers: [],
+  resumeVersions: [], applications: [], jobDescriptions: [], applicationLinks: [], assessments: [], interviews: [], offers: [],
   contacts: [], notes: [], activities: [], profile: [],
 };
 
