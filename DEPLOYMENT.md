@@ -1,5 +1,13 @@
 # Deployment
 
+## Recommended no-card path
+
+Use Supabase + Vercel. See `SUPABASE_VERCEL_DEPLOYMENT.md`.
+
+This keeps the cloud database in Supabase Postgres and deploys the app on Vercel. Local development can continue using SQLite.
+
+## Render persistent-disk path
+
 This app stores its data in SQLite. Use a host with persistent disk storage and keep `DATABASE_URL` pointed at that disk.
 
 ## Local backup

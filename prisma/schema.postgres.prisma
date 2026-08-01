@@ -1,0 +1,223 @@
+// Postgres deployment schema for Supabase/Vercel.
+// Keep prisma/schema.prisma as the local SQLite schema so existing local tests
+// and backups continue to work.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Application {
+  id                       String            @id @default(cuid())
+  applicationCode          String            @unique
+  company                  String
+  role                     String
+  jobId                    String?
+  location                 String?
+  workModel                String?
+  postingDate              DateTime?
+  applicationDeadline      DateTime?
+  dateFound                DateTime?
+  dateApplied              DateTime?
+  status                   String            @default("Not Applied")
+  currentStage             String?
+  priority                 String            @default("P2")
+  applicationUrl           String?
+  candidatePortalUrl       String?
+  confirmationNumber       String?
+  compensationSummary      String?
+  eligibility              String?
+  sponsorship              String?
+  whyFit                   String?
+  nextAction               String?
+  nextActionDue            DateTime?
+  nextActionDueKind        String            @default("timestamp")
+  emailUsed                String?
+  coverLetterStatus        String?
+  referralStatus           String?
+  notes                    String?
+  outcome                  String?
+  postingStatus            String?
+  portalUsername           String?
+  passwordManagerReference String?
+  lastVerifiedAt           DateTime?
+  archived                 Boolean           @default(false)
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+  resumeVersionId          String?
+  resumeVersion            ResumeVersion?    @relation(fields: [resumeVersionId], references: [id])
+  jobDescription           JobDescription?
+  interviews               Interview[]
+  assessments              Assessment[]
+  contacts                 Contact[]
+  notesRelation            Note[]
+  activities               Activity[]
+  documents                Document[]
+  offers                   Offer?
+  links                    ApplicationLink[]
+}
+
+model ApplicationLink {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id])
+  label         String
+  url           String
+  category      String?
+  notes         String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model JobDescription {
+  id                      String      @id @default(cuid())
+  applicationId           String      @unique
+  application             Application @relation(fields: [applicationId], references: [id])
+  fullText                String?
+  minimumQualifications   String?
+  preferredQualifications String?
+  keywords                String?
+  savedAt                 DateTime    @default(now())
+  sourceUrl               String?
+  contentHash             String?
+}
+
+model ResumeVersion {
+  id           String        @id @default(cuid())
+  name         String
+  fileName     String?
+  description  String?
+  targetType   String
+  filePath     String?
+  createdAt    DateTime      @default(now())
+  archived     Boolean       @default(false)
+  applications Application[]
+}
+
+model Assessment {
+  id                   String      @id @default(cuid())
+  applicationId        String
+  application          Application @relation(fields: [applicationId], references: [id])
+  type                 String
+  platform             String?
+  receivedAt           DateTime?
+  dueAt                DateTime?
+  timezone             String?
+  completedAt          DateTime?
+  durationMinutes      Int?
+  questionCount        Int?
+  topics               String?
+  difficulty           String?
+  confidence           String?
+  result               String?
+  encounteredQuestions String?
+  notes                String?
+}
+
+model Offer {
+  id                  String      @id @default(cuid())
+  applicationId       String      @unique
+  application         Application @relation(fields: [applicationId], references: [id])
+  offerDate           DateTime?
+  decisionDeadline    DateTime?
+  compensationSummary String?
+  notes               String?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+}
+
+model Interview {
+  id             String      @id @default(cuid())
+  applicationId  String
+  application    Application @relation(fields: [applicationId], references: [id])
+  stage          String
+  scheduledStart DateTime?
+  scheduledEnd   DateTime?
+  timezone       String?
+  format         String?
+  location       String?
+  meetingUrl     String?
+  interviewer    String?
+  recruiter      String?
+  completedAt    DateTime?
+  result         String?
+  questions      String?
+  whatWentWell   String?
+  improvements   String?
+  followUpDate   DateTime?
+  notes          String?
+}
+
+model Contact {
+  id             String      @id @default(cuid())
+  applicationId  String
+  application    Application @relation(fields: [applicationId], references: [id])
+  name           String
+  title          String?
+  company        String?
+  email          String?
+  linkedInUrl    String?
+  relationship   String?
+  referralStatus String?
+  lastContacted  DateTime?
+  nextFollowUp   DateTime?
+  notes          String?
+}
+
+model Note {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id])
+  category      String?
+  content       String
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model Activity {
+  id             String      @id @default(cuid())
+  applicationId  String
+  application    Application @relation(fields: [applicationId], references: [id])
+  eventType      String
+  previousStatus String?
+  newStatus      String?
+  previousStage  String?
+  newStage       String?
+  summary        String
+  metadataJson   String?
+  createdAt      DateTime    @default(now())
+}
+
+model Document {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id])
+  type          String
+  name          String
+  filePath      String?
+  createdAt     DateTime    @default(now())
+}
+
+model UserProfile {
+  id                  String @id @default(cuid())
+  name                String @default("Riddhima Yadav")
+  school              String @default("The University of Texas at Austin")
+  major               String @default("Computer Science")
+  graduation          String @default("December 2027")
+  workAuthorization   String @default("U.S. citizen")
+  preferredLocation   String @default("New York City")
+  otherLocations      String @default("Major U.S. cities")
+  currentExperience   String @default("DraftKings Software Engineering Intern")
+  targetRoles         String @default("2027 Software Engineering Internships")
+  targetCategories    String @default("Highly selective technology, quantitative trading, fintech and strong product companies")
+  defaultFollowUpDays Int    @default(10)
+  defaultDueDays      Int    @default(2)
+  dateFormat          String @default("MM/dd/yyyy")
+  theme               String @default("light")
+  databaseLocation    String @default("data/dev.db")
+}
