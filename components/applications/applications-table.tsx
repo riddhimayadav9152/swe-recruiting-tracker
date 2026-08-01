@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronUp, X, Minimize2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, X, Minimize2, Trash2 } from 'lucide-react';
+import { toast } from 'react-hot-toast';
 import { formatByKind, formatDateOnly, formatInZone, formatTimestamp, resolveDeadlineInstant } from '@/lib/dates';
 import { isPersonalDeadlineOverdue } from '@/lib/deadline-sort';
 import { Timeline } from './timeline';
@@ -113,6 +114,7 @@ export function ApplicationsTable({
   const [statusFilter, setStatusFilter] = useState('');
   const [postingStatusFilter, setPostingStatusFilter] = useState('');
   const [drawerCollapsed, setDrawerCollapsed] = useState(false);
+  const [deletingApplicationId, setDeletingApplicationId] = useState<string | null>(null);
   // Defaults to "actions" — the workflow buttons (Mark Applied, OA Received,
   // …) are the most common thing done right after selecting a row, so they
   // should be immediately visible without an extra tab click.
@@ -153,6 +155,26 @@ export function ApplicationsTable({
 
   const statusOptions = useMemo(() => [...new Set(applications.map((a) => a.status))].sort(), [applications]);
   const postingStatusOptions = useMemo(() => [...new Set(applications.map((a) => a.postingStatus).filter((v): v is string => !!v))].sort(), [applications]);
+
+  const deleteApplication = async (application: ApplicationRecord) => {
+    const confirmed = window.confirm(`Delete ${application.company} — ${application.role}? This also removes its links, notes, timeline, interviews, OAs, offers, contacts, and job description.`);
+    if (!confirmed) return;
+
+    setDeletingApplicationId(application.id);
+    try {
+      const response = await fetch(`/api/applications/${application.id}`, { method: 'DELETE' });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        toast.error(data.error ?? 'Unable to delete application');
+        return;
+      }
+      toast.success('Application deleted');
+      onSelect(null);
+      await onChanged();
+    } finally {
+      setDeletingApplicationId(null);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -207,6 +229,14 @@ export function ApplicationsTable({
                   <div className="flex flex-wrap items-center gap-2">
                     <button onClick={() => onEdit(selectedApp)} className="rounded-lg bg-[#ff87ab] px-4 py-2 text-sm font-medium text-slate-900 shadow-sm" data-testid="open-edit-application">
                       Edit Application
+                    </button>
+                    <button
+                      onClick={() => deleteApplication(selectedApp)}
+                      disabled={deletingApplicationId === selectedApp.id}
+                      className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 shadow-sm transition hover:bg-rose-100 disabled:opacity-50"
+                      data-testid="delete-application"
+                    >
+                      <Trash2 size={16} /> {deletingApplicationId === selectedApp.id ? 'Deleting…' : 'Delete Application'}
                     </button>
                   </div>
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">

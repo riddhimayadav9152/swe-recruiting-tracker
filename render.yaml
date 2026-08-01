@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: swe-recruiting-tracker
+    runtime: node
+    buildCommand: npm ci && npm run prisma:generate && npm run build
+    startCommand: npm run deploy:start
+    healthCheckPath: /api/health
+    disk:
+      name: tracker-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        value: file:/var/data/dev.db
+      - key: APP_USERNAME
+        value: riddhi
+      - key: APP_PASSWORD
+        sync: false

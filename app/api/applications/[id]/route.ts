@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { workflowPayloadSchema } from '@/lib/schemas/workflows';
-import { applyWorkflow, contactWorkflow, editApplicationWorkflow, interviewCompletedWorkflow, interviewReceivedWorkflow, oaCompletedWorkflow, oaReceivedWorkflow, offerWorkflow, rejectWorkflow, setApplicationDateWorkflow } from '@/lib/workflows/applications';
+import { applyWorkflow, contactWorkflow, deleteApplicationWorkflow, editApplicationWorkflow, interviewCompletedWorkflow, interviewReceivedWorkflow, oaCompletedWorkflow, oaReceivedWorkflow, offerWorkflow, rejectWorkflow, setApplicationDateWorkflow } from '@/lib/workflows/applications';
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -119,5 +119,16 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json(updated);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Unknown error' }, { status: 400 });
+  }
+}
+
+export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  try {
+    const deleted = await deleteApplicationWorkflow(prisma, id);
+    return NextResponse.json({ deleted: true, applicationId: deleted.id });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: message === 'Application not found' ? 404 : 400 });
   }
 }

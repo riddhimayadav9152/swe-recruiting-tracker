@@ -69,6 +69,25 @@ test.describe('Edit Application', () => {
 
     await expect(page.getByLabel('Status', { exact: true })).toHaveCount(0);
   });
+
+  test('deletes an application from the Overview drawer after confirmation', async ({ page }) => {
+    await page.goto('/');
+    await waitForTrackerLoaded(page);
+
+    const company = `Delete Co ${uniqueId()}`;
+    await createOpportunity(page, company);
+    await openApplication(page, company);
+    await page.getByTestId('drawer-tab-overview').click();
+
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.getByTestId('delete-application').click();
+    await expect(page.getByText('Application deleted')).toBeVisible();
+    await expect(page.getByTestId('application-detail-drawer')).toHaveCount(0);
+
+    const applications = await page.request.get('/api/applications').then((res) => res.json());
+    expect(applications.find((app: { company: string }) => app.company === company)).toBeUndefined();
+    await expect(page.locator('table tbody tr', { hasText: company })).toHaveCount(0);
+  });
 });
 
 test.describe('Notes CRUD', () => {

@@ -29,6 +29,11 @@ const toFormState = (app: ApplicationRecord): EditFormState => ({
 const field = 'w-full rounded-lg border border-[#ffc4d6] bg-white p-2 text-sm outline-none focus:border-[#ffa6c1] focus:ring-2 focus:ring-[#ffcad4]';
 const label = 'block text-xs font-medium text-slate-600';
 
+const validationErrorMessage = (errors: Record<string, string[] | undefined>) => {
+  const [fieldName, messages] = Object.entries(errors).find(([, fieldMessages]) => fieldMessages?.length) ?? [];
+  return fieldName && messages?.[0] ? `${fieldName}: ${messages[0]}` : 'Unable to save changes';
+};
+
 export function EditApplicationModal({ application, onClose, onSaved }: { application: ApplicationRecord; onClose: () => void; onSaved: () => Promise<void> | void }) {
   const [form, setForm] = useState<EditFormState>(() => toFormState(application));
   const [saving, setSaving] = useState(false);
@@ -58,7 +63,7 @@ export function EditApplicationModal({ application, onClose, onSaved }: { applic
       });
       if (!response.ok) {
         const data = await response.json().catch(() => null);
-        toast.error(data?.error ?? 'Unable to save changes');
+        toast.error(data?.error ?? (data?.errors ? validationErrorMessage(data.errors) : 'Unable to save changes'));
         return;
       }
       toast.success('Application updated');

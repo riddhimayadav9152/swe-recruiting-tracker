@@ -9,6 +9,7 @@ import {
   contactWorkflow,
   createApplicationRecord,
   createLinkWorkflow,
+  deleteApplicationWorkflow,
   deleteLinkWorkflow,
   deleteNoteWorkflow,
   editApplicationWorkflow,
@@ -66,6 +67,44 @@ const createAppliedApplication = async (overrides: { company?: string; role?: st
 };
 
 describe('workflow services', () => {
+  it('deletes an application and all application-scoped child records', async () => {
+    const resume = await prisma.resumeVersion.create({ data: { name: 'Shared Resume', targetType: 'SWE' } });
+    const application = await createApplicationRecord(prisma, {
+      company: 'Delete Me Co',
+      role: 'Software Engineer',
+      applicationUrl: 'https://deleteme.example.com/apply',
+      priority: 'P1',
+    });
+    await prisma.application.update({ where: { id: application.id }, data: { resumeVersionId: resume.id } });
+    await prisma.applicationLink.create({ data: { applicationId: application.id, label: 'Portal', url: 'https://deleteme.example.com/portal' } });
+    await prisma.note.create({ data: { applicationId: application.id, content: 'Delete this note' } });
+    await prisma.contact.create({ data: { applicationId: application.id, name: 'Recruiter' } });
+    await prisma.jobDescription.create({ data: { applicationId: application.id, fullText: 'Delete this job description' } });
+    await prisma.assessment.create({ data: { applicationId: application.id, type: 'OA' } });
+    await prisma.interview.create({ data: { applicationId: application.id, stage: 'Technical Interview' } });
+    await prisma.offer.create({ data: { applicationId: application.id } });
+    await prisma.document.create({ data: { applicationId: application.id, type: 'Resume', name: 'Submitted resume' } });
+    await prisma.activity.create({ data: { applicationId: application.id, eventType: 'Seed', summary: 'Seed activity' } });
+
+    await deleteApplicationWorkflow(prisma, application.id);
+
+    expect(await prisma.application.findUnique({ where: { id: application.id } })).toBeNull();
+    expect(await prisma.applicationLink.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.note.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.contact.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.jobDescription.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.assessment.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.interview.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.offer.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.document.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.activity.count({ where: { applicationId: application.id } })).toBe(0);
+    expect(await prisma.resumeVersion.findUnique({ where: { id: resume.id } })).not.toBeNull();
+  });
+
+  it('throws when deleting an application that does not exist', async () => {
+    await expect(deleteApplicationWorkflow(prisma, 'does-not-exist')).rejects.toThrow('Application not found');
+  });
+
   it('marks applied with a valid resume', async () => {
     const resume = await prisma.resumeVersion.create({ data: { name: '2026 Resume', targetType: 'SWE', fileName: 'resume.pdf' } });
     const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
@@ -735,6 +774,15 @@ describe('editApplicationWorkflow', () => {
     const updated = await editApplicationWorkflow(prisma, application.id, { action: 'editApplication', nextActionDue: '2026-09-01', nextActionDueKind: 'date' });
     expect(updated.nextActionDue?.toISOString().slice(0, 10)).toBe('2026-09-01');
     expect(updated.nextActionDueKind).toBe('date');
+  });
+
+  it('persists a nextActionDueKind-only change when the due value is blank', async () => {
+    const application = await createApplicationRecord(prisma, { company: 'Acme', role: 'Software Engineer', applicationUrl: 'https://acme.com/apply', priority: 'P1' });
+    await prisma.application.update({ where: { id: application.id }, data: { nextActionDue: null, nextActionDueKind: 'date' } });
+
+    const updated = await editApplicationWorkflow(prisma, application.id, { action: 'editApplication', nextActionDue: null, nextActionDueKind: 'timestamp' });
+    expect(updated.nextActionDue).toBeNull();
+    expect(updated.nextActionDueKind).toBe('timestamp');
   });
 
   it('throws when the application does not exist', async () => {

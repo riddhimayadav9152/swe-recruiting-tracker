@@ -147,6 +147,25 @@ export async function createApplicationRecord(prisma: PrismaClient, input: {
   });
 }
 
+export async function deleteApplicationWorkflow(prisma: WorkflowPrisma, applicationId: string) {
+  const existing = await prisma.application.findUnique({ where: { id: applicationId } });
+  if (!existing) throw new Error('Application not found');
+
+  return prisma.$transaction(async (tx) => {
+    await tx.activity.deleteMany({ where: { applicationId } });
+    await tx.note.deleteMany({ where: { applicationId } });
+    await tx.contact.deleteMany({ where: { applicationId } });
+    await tx.jobDescription.deleteMany({ where: { applicationId } });
+    await tx.applicationLink.deleteMany({ where: { applicationId } });
+    await tx.assessment.deleteMany({ where: { applicationId } });
+    await tx.interview.deleteMany({ where: { applicationId } });
+    await tx.offer.deleteMany({ where: { applicationId } });
+    await tx.document.deleteMany({ where: { applicationId } });
+    await tx.application.delete({ where: { id: applicationId } });
+    return existing;
+  });
+}
+
 export async function applyWorkflow(prisma: WorkflowPrisma, applicationId: string, payload: ApplyPayload) {
   const existing = await prisma.application.findUnique({ where: { id: applicationId } });
   if (!existing) throw new Error('Application not found');
@@ -667,7 +686,10 @@ export async function editApplicationWorkflow(prisma: WorkflowPrisma, applicatio
     const kind = payload.nextActionDueKind ?? 'date';
     const parsed = payload.nextActionDue ? (kind === 'date' ? parseDateOnly(payload.nextActionDue) : parseDateTimeLocal(payload.nextActionDue)) : null;
     record('nextActionDue', 'Personal next-action due date/time', parsed);
-    if (existing.nextActionDueKind !== kind) data.nextActionDueKind = kind;
+    if (existing.nextActionDueKind !== kind) {
+      data.nextActionDueKind = kind;
+      changes.push('Personal next-action due type');
+    }
   }
 
   if (!changes.length) return existing;
