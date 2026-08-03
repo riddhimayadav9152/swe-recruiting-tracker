@@ -29,14 +29,9 @@ export const resolveBackupPath = (fileName: string): string => {
 
 /** Queries SQLite's own PRAGMA database_list for the main database's actual file basename — the one generic way to know which file ANY given PrismaClient (default or a test-constructed one pointed elsewhere) is really backing. Falls back to 'db' if it can't be determined (e.g. an in-memory database with no file). */
 async function resolveSourceDbBaseName(client: PrismaClient): Promise<string> {
-  try {
-    const rows = await client.$queryRawUnsafe<Array<{ name: string; file: string }>>('PRAGMA database_list;');
-    const main = rows.find((row) => row.name === 'main');
-    if (main?.file) return path.basename(main.file);
-  } catch {
-    // Fall through to the generic default below.
-  }
-  return 'db';
+  const rows = await client.$queryRawUnsafe<Array<{ name: string; file: string }>>('PRAGMA database_list;');
+  const main = rows.find((row) => row.name === 'main');
+  return main?.file ? path.basename(main.file) : 'db';
 }
 
 /**
@@ -61,15 +56,21 @@ async function resolveSourceDbBaseName(client: PrismaClient): Promise<string> {
  * operator/debugging use only.
  */
 export async function createDatabaseBackup(client: PrismaClient = defaultPrisma): Promise<DatabaseBackupResult> {
-  const backupDir = backupDirectory();
-  fs.mkdirSync(backupDir, { recursive: true });
-
   // Ask the connection itself which file it's actually backing (rather than
   // assuming "dev.db") — this backup helper runs against whatever database
   // the calling environment is actually pointed at (dev.db in production,
   // a dedicated e2e-test.db under Playwright, an arbitrary test db in unit
   // tests), and the filename should reflect that, not a hardcoded guess.
-  const sourceDbName = await resolveSourceDbBaseName(client);
+  let sourceDbName: string;
+  try {
+    sourceDbName = await resolveSourceDbBaseName(client);
+  } catch (error) {
+    console.log(`[import backup] skipped local file backup for managed database: ${error instanceof Error ? error.message : 'non-SQLite database'}`);
+    return { fileName: 'managed-database-backup-not-created' };
+  }
+
+  const backupDir = backupDirectory();
+  fs.mkdirSync(backupDir, { recursive: true });
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const fileName = `${sourceDbName}.pre-import-${stamp}-${randomUUID()}.bak`;

@@ -88,3 +88,9 @@ Check:
 - Editing and saving an application works.
 
 After this passes, bookmark the Vercel URL.
+
+## Supabase backup behavior
+
+The local SQLite app creates file backups before import commits. The Vercel/Supabase deployment uses a managed Postgres database, so import commits do not try to write SQLite backup files to Vercel's read-only deployment filesystem.
+
+Before large cloud imports, use the app's workbook export or a Supabase database backup/export as your rollback point.

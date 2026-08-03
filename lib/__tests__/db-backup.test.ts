@@ -136,4 +136,16 @@ describe('createDatabaseBackup', () => {
     expect(fs.existsSync(resolveBackupPath(first.fileName))).toBe(true);
     expect(fs.existsSync(resolveBackupPath(second.fileName))).toBe(true);
   });
+
+  it('skips local file backup for non-SQLite databases instead of writing to the serverless filesystem', async () => {
+    vi.resetModules();
+    const { createDatabaseBackup } = await import('../db-backup');
+    const client = {
+      $queryRawUnsafe: vi.fn().mockRejectedValue(new Error('syntax error at or near "PRAGMA"')),
+    } as unknown as PrismaClient;
+
+    const result = await createDatabaseBackup(client);
+
+    expect(result).toEqual({ fileName: 'managed-database-backup-not-created' });
+  });
 });

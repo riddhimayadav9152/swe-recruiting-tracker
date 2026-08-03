@@ -1,13 +1,17 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { prisma } from '@/lib/prisma';
+import { prisma, resolvedDatabaseFilePath } from '@/lib/prisma';
 import { createDatabaseBackup, resolveBackupPath } from '@/lib/db-backup';
 
 const dataDir = path.resolve(process.cwd(), 'data');
 const dbPath = path.resolve(dataDir, 'dev.db');
 
 export async function GET() {
+  if (!resolvedDatabaseFilePath) {
+    return NextResponse.json({ error: 'File backup download is only available for local SQLite databases. Use the app export flow for Supabase/Postgres.' }, { status: 501 });
+  }
+
   if (!fs.existsSync(dbPath)) {
     return NextResponse.json({ error: 'Database not found' }, { status: 404 });
   }
@@ -33,6 +37,10 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  if (!resolvedDatabaseFilePath) {
+    return NextResponse.json({ error: 'SQLite database restore is only available for local SQLite databases. Use the workbook import/restore flow for Supabase/Postgres.' }, { status: 501 });
+  }
+
   const formData = await request.formData();
   const file = formData.get('file');
   if (!file || typeof file === 'string') return NextResponse.json({ error: 'File required' }, { status: 400 });
